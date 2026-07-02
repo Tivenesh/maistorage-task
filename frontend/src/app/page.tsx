@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import SessionSidebar from "@/components/SessionSidebar";
 import ChatWindow from "@/components/ChatWindow";
+import ProjectWorkspace from "@/components/ProjectWorkspace";
 import WorkspaceModals, { ModalMode } from "@/components/WorkspaceModals";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -10,6 +11,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 interface Session {
   id: string;
   title: string;
+  project_id?: string | null;
   created_at: string;
 }
 
@@ -114,7 +116,7 @@ export default function Home() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState("general");
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [selectedModel, setSelectedModel] = useState("gemini-2.5-pro-preview-03-25");
+  const [selectedModel, setSelectedModel] = useState("models/gemini-3.1-pro-preview");
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -125,11 +127,12 @@ export default function Home() {
   const [settings, setSettings] = useState<AppSettings>({
     theme: "light",
     sidebar_collapsed: false,
-    default_model: "gemini-2.5-pro-preview-03-25",
+    default_model: "models/gemini-3.1-pro-preview",
   });
   const [modalMode, setModalMode] = useState<ModalMode | null>(null);
   const [searchMode, setSearchMode] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
+  const [orchestrate, setOrchestrate] = useState(false);
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -254,22 +257,30 @@ export default function Home() {
     return () => window.clearTimeout(timeoutId);
   }, [fetchProjectDocuments, selectedProjectId]);
 
-  const handleCreateSession = async () => {
+  const createSession = async (projectId?: string | null): Promise<Session | null> => {
     try {
       const res = await fetch(`${API_URL}/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "New Conversation" }),
+        body: JSON.stringify({ title: "New Conversation", project_id: projectId || null }),
       });
       if (res.ok) {
-        const newSession = await res.json();
+        const newSession: Session = await res.json();
         setSessions((prev) => [newSession, ...prev]);
         setCurrentSessionId(newSession.id);
+        setSelectedProjectId(newSession.project_id || "");
         setMessages([]);
+        return newSession;
       }
     } catch (err) {
       console.error("Failed to create session:", err);
     }
+
+    return null;
+  };
+
+  const handleCreateSession = async () => {
+    await createSession(null);
   };
 
   const handleDeleteSession = async (id: string) => {
@@ -291,7 +302,17 @@ export default function Home() {
 
   const handleSelectSession = (id: string) => {
     if (isStreaming) return; // Prevent switching sessions while streaming
+    const session = sessions.find((item) => item.id === id);
+    setSelectedProjectId(session?.project_id || "");
     setCurrentSessionId(id);
+  };
+
+  const handleSelectProject = (projectId: string) => {
+    if (isStreaming) return;
+    setSelectedProjectId(projectId);
+    setCurrentSessionId(null);
+    setMessages([]);
+    void fetchProjectDocuments(projectId);
   };
 
   const handleSendMessageWithSessionId = async (
@@ -319,6 +340,7 @@ export default function Home() {
           project_id: selectedProjectId || null,
           search_mode: searchMode,
           web_search: webSearch,
+          orchestrate,
           attachments,
         }),
       });
@@ -421,26 +443,21 @@ export default function Home() {
     let targetSessionId = currentSessionId;
 
     if (!targetSessionId) {
-      try {
-        const res = await fetch(`${API_URL}/sessions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: "New Conversation" }),
-        });
-        if (!res.ok) return;
-
-        const newSession: Session = await res.json();
-        setSessions((prev) => [newSession, ...prev]);
-        setCurrentSessionId(newSession.id);
-        setMessages([]);
-        targetSessionId = newSession.id;
-      } catch (err) {
-        console.error("Failed to create session before sending:", err);
+      const newSession = await createSession(selectedProjectId || null);
+      if (!newSession) {
         return;
       }
+      targetSessionId = newSession.id;
     }
 
     await handleSendMessageWithSessionId(targetSessionId, messageText, attachments);
+  };
+
+  const handleStartProjectChat = async (message?: string) => {
+    if (!selectedProjectId || isStreaming) return;
+    const newSession = await createSession(selectedProjectId);
+    if (!newSession || !message) return;
+    await handleSendMessageWithSessionId(newSession.id, message, []);
   };
 
   const saveProvider = async (payload: Record<string, string>) => {
@@ -518,6 +535,13 @@ export default function Home() {
     }
   };
 
+  const activeProject = selectedProjectId
+    ? projects.find((project) => project.id === selectedProjectId) ?? null
+    : null;
+  const activeProjectSessions = activeProject
+    ? sessions.filter((session) => session.project_id === activeProject.id)
+    : [];
+
   return (
     <div className="flex h-[100dvh] w-full overflow-hidden bg-slate-50 text-slate-950 max-md:flex-col">
       {/* Sidebar - Sessions list & controls */}
@@ -531,35 +555,48 @@ export default function Home() {
         onSelectAgent={setSelectedAgentId}
         agents={agents}
         projects={projects}
+        selectedProjectId={selectedProjectId}
         collapsed={settings.sidebar_collapsed}
         onToggleCollapsed={handleSidebarCollapse}
+        onSelectProject={handleSelectProject}
         onOpenAgents={() => setModalMode("agent")}
         onOpenProject={() => setModalMode("project")}
         onOpenSettings={() => setModalMode("settings")}
       />
 
-      {/* Main chat window */}
-      <ChatWindow
-        sessionId={currentSessionId}
-        messages={messages}
-        onSendMessage={handleSendMessage}
-        isStreaming={isStreaming}
-        selectedAgentId={selectedAgentId}
-        models={models}
-        selectedModel={selectedModel}
-        onSelectModel={setSelectedModel}
-        activeWorkspace={activeWorkspace}
-        onWorkspaceSelected={saveWorkspace}
-        projects={projects}
-        selectedProjectId={selectedProjectId}
-        onSelectProject={setSelectedProjectId}
-        projectDocuments={projectDocuments}
-        onSaveProjectDocument={saveProjectDocument}
-        searchMode={searchMode}
-        webSearch={webSearch}
-        onToggleSearchMode={() => setSearchMode((enabled) => !enabled)}
-        onToggleWebSearch={() => setWebSearch((enabled) => !enabled)}
-      />
+      {activeProject && !currentSessionId ? (
+        <ProjectWorkspace
+          project={activeProject}
+          documents={projectDocuments}
+          sessions={activeProjectSessions}
+          onUploadDocument={saveProjectDocument}
+          onStartChat={handleStartProjectChat}
+          onOpenSession={handleSelectSession}
+        />
+      ) : (
+        <ChatWindow
+          sessionId={currentSessionId}
+          messages={messages}
+          onSendMessage={handleSendMessage}
+          isStreaming={isStreaming}
+          selectedAgentId={selectedAgentId}
+          models={models}
+          selectedModel={selectedModel}
+          onSelectModel={setSelectedModel}
+          activeWorkspace={activeWorkspace}
+          onWorkspaceSelected={saveWorkspace}
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          projectDocuments={projectDocuments}
+          onSaveProjectDocument={saveProjectDocument}
+          searchMode={searchMode}
+          webSearch={webSearch}
+          orchestrate={orchestrate}
+          onToggleSearchMode={() => setSearchMode((enabled) => !enabled)}
+          onToggleWebSearch={() => setWebSearch((enabled) => !enabled)}
+          onToggleOrchestrate={() => setOrchestrate((enabled) => !enabled)}
+        />
+      )}
 
       <WorkspaceModals
         mode={modalMode}

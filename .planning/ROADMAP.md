@@ -12,14 +12,17 @@
 - [x] Multi-turn memory across session messages
 - [x] LLM provider management (Gemini, OpenAI, Anthropic, DeepSeek, OpenRouter)
 - [x] Agent configs with custom system prompts
-- [x] Projects with document upload / RAG context
+- [x] Projects with shared source upload and semantic RAG context
+- [x] Notebook-style project workspace with multiple project-bound chats
+- [x] SQLite `document_chunks` vector storage with Gemini embeddings and keyword fallback
 - [x] Code workspace (folder selection, file tree, editor)
 - [x] Web search augmentation (Wikipedia OpenSearch)
 - [x] Voice input (Web Speech API)
 - [x] Collapsible sidebar, settings panel, theme toggle
 
 ## Phase 3: Polish & Ship ✅
-- [x] 10 automated backend tests (all passing)
+- [x] 23 automated backend tests (all passing)
 - [x] Frontend builds with zero errors (Next.js standalone)
-- [x] Docker Compose for backend + frontend
+- [x] Docker Compose for backend + frontend, verified with `docker compose up --build -d`
 - [x] Documentation (README, API docs at /docs)
+- [x] Manual demo flow: upload `runbook.md`, ask deployment question, receive cited `FALCON-9` answer

@@ -1,8 +1,8 @@
 "use client";
 
 import Image from "next/image";
-import { ArrowDown, Bot, ChevronDown, Code2, FileCode2, FileText, FolderOpen, Globe, Mic, Paperclip, Plus, Save, Search, Send, Terminal, UploadCloud, User, X } from "lucide-react";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { Activity, ArrowDown, Bot, BrainCircuit, ChevronDown, Clock, Code2, CreditCard, FileCode2, FileText, FolderOpen, Gauge, Globe, Mic, Paperclip, Plus, Save, Search, Send, Terminal, UploadCloud, User, X } from "lucide-react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { AttachmentPayload, ModelOption, Project, ProjectDocument, WorkspaceState } from "@/app/page";
 
 interface Message {
@@ -23,13 +23,14 @@ interface ChatWindowProps {
   onWorkspaceSelected: (workspace: WorkspaceState) => Promise<void>;
   projects: Project[];
   selectedProjectId: string;
-  onSelectProject: (projectId: string) => void;
   projectDocuments: ProjectDocument[];
   onSaveProjectDocument: (projectId: string, document: AttachmentPayload) => Promise<void>;
   searchMode: boolean;
   webSearch: boolean;
+  orchestrate: boolean;
   onToggleSearchMode: () => void;
   onToggleWebSearch: () => void;
+  onToggleOrchestrate: () => void;
 }
 
 interface SpeechRecognitionEventLike extends Event {
@@ -77,8 +78,48 @@ const AGENT_LABELS: Record<string, string> = {
 
 const MAX_FILE_CHARS = 6000;
 const MAX_FILE_BYTES = 80_000;
+const CONTEXT_LIMIT_TOKENS = 1_000_000;
+const ESTIMATED_CHARS_PER_TOKEN = 4;
 const IGNORED_DIRS = new Set([".git", "node_modules", ".next", "dist", "build", "__pycache__", ".venv", "venv"]);
 const READABLE_FILE_PATTERN = /\.(txt|md|json|csv|log|ts|tsx|js|jsx|py|css|html|yml|yaml|toml|env|sql|sh|ps1)$/i;
+
+function estimateTokens(text: string) {
+  return Math.ceil(text.length / ESTIMATED_CHARS_PER_TOKEN);
+}
+
+function estimateTokensFromChars(chars: number) {
+  return Math.ceil(chars / ESTIMATED_CHARS_PER_TOKEN);
+}
+
+function formatInteger(value: number) {
+  return new Intl.NumberFormat().format(value);
+}
+
+function formatCompact(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: value >= 10_000 ? 1 : 0,
+    notation: "compact",
+  }).format(value);
+}
+
+function formatDuration(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${totalSeconds}s`;
+}
+
+function reasoningText(content: string) {
+  return content
+    .split("\n")
+    .filter((line) =>
+      /^\s*(\[THOUGHT\]|\[PLANNER\]|\[RESEARCH\/RAG\]|\[CODER\]|\[REVIEWER\]|Reasoning:|Thought:|Plan:)/i.test(line)
+    )
+    .join("\n");
+}
 
 function renderAgenticContent(content: string) {
   const lines = content.split("\n");
@@ -110,8 +151,8 @@ function renderAgenticContent(content: string) {
   }
 
   lines.forEach((line, index) => {
-    const isActionLine = /^\s*(\[TOOL\]|\[ACTION\]|Tool:|Action:|edit_file|bash)\b/i.test(line);
-    const isReasoningLine = /^\s*(Reasoning:|Thought:|Because:|Plan:|evidence:)/i.test(line);
+    const isActionLine = /^\s*(\[TOOL\]|\[ACTION\]|\[THOUGHT\]|\[ANSWER\]|\[PLANNER\]|\[RESEARCH\/RAG\]|\[CODER\]|\[REVIEWER\]|Tool:|Action:|edit_file|bash)\b/i.test(line);
+    const isReasoningLine = /^\s*(Reasoning:|Thought:|Because:|Plan:|Output:|Evidence:)/i.test(line);
 
     if (isActionLine) {
       flushAction(`action-${index}`);
@@ -149,13 +190,14 @@ export default function ChatWindow({
   onWorkspaceSelected,
   projects,
   selectedProjectId,
-  onSelectProject,
   projectDocuments,
   onSaveProjectDocument,
   searchMode,
   webSearch,
+  orchestrate,
   onToggleSearchMode,
   onToggleWebSearch,
+  onToggleOrchestrate,
 }: ChatWindowProps) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<AttachmentPayload[]>([]);
@@ -173,9 +215,73 @@ export default function ChatWindow({
   const [terminalLines, setTerminalLines] = useState<string[]>([
     "[workspace] No folder selected yet.",
   ]);
+  const [sessionStartedAt, setSessionStartedAt] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
 
   const activeFileContent =
     activeWorkspace?.selected_files.find((file) => file.name === activeFilePath)?.content ?? "";
+
+  useEffect(() => {
+    setSessionStartedAt(Date.now());
+  }, [sessionId]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  const overviewStats = useMemo(() => {
+    const promptChars =
+      messages
+        .filter((message) => message.role === "user")
+        .reduce((total, message) => total + message.content.length, 0) + input.length;
+    const fileContextChars = [
+      ...attachments,
+      ...(activeWorkspace?.selected_files ?? []),
+      ...(selectedProjectId ? projectDocuments : []),
+    ].reduce((total, item) => total + (item.content?.length ?? 0), 0);
+    const assistantContent = messages
+      .filter((message) => message.role === "assistant")
+      .map((message) => message.content)
+      .join("\n");
+    const assistantTokens = estimateTokens(assistantContent);
+    const reasoningTokens = estimateTokens(reasoningText(assistantContent));
+    const promptTokens = estimateTokensFromChars(promptChars);
+    const otherTokens =
+      estimateTokensFromChars(fileContextChars) +
+      (searchMode ? 64 : 0) +
+      (webSearch ? 64 : 0) +
+      (orchestrate ? 128 : 0);
+    const completionTokens = Math.max(0, assistantTokens - reasoningTokens);
+    const totalTokens = promptTokens + completionTokens + reasoningTokens + otherTokens;
+    const contextPercent = Math.min(
+      100,
+      Math.round((totalTokens / CONTEXT_LIMIT_TOKENS) * 100)
+    );
+    const requestCount = messages.filter((message) => message.role === "user").length;
+    const activeFlags = [searchMode, webSearch, orchestrate].filter(Boolean).length;
+
+    return {
+      activeFlags,
+      completionTokens,
+      contextPercent,
+      fileContextTokens: otherTokens,
+      promptTokens,
+      reasoningTokens,
+      requestCount,
+      totalTokens,
+    };
+  }, [
+    activeWorkspace?.selected_files,
+    attachments,
+    input,
+    messages,
+    orchestrate,
+    projectDocuments,
+    searchMode,
+    selectedProjectId,
+    webSearch,
+  ]);
 
   useEffect(() => {
     if (!activeWorkspace) {
@@ -432,7 +538,7 @@ export default function ChatWindow({
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className={`flex-1 overflow-y-auto ${activeWorkspace ? "mr-[44%] border-r border-slate-200" : ""}`}
+        className={`flex-1 overflow-y-auto ${activeWorkspace ? "mr-[44%] border-r border-slate-200" : "xl:mr-80"}`}
       >
         {!sessionId ? (
           <section className="mx-auto flex min-h-full w-full max-w-[760px] flex-col items-center justify-center px-6 pb-40 pt-12">
@@ -617,14 +723,6 @@ export default function ChatWindow({
                       {projectDocuments.length} scoped document{projectDocuments.length === 1 ? "" : "s"}
                     </p>
                   </div>
-                  <input
-                    ref={projectDocInputRef}
-                    type="file"
-                    multiple
-                    className="hidden"
-                    accept=".txt,.md,.json,.csv,.log,text/*,application/json"
-                    onChange={(event) => void handleProjectDocumentSelection(event.target.files)}
-                  />
                   <button
                     type="button"
                     disabled={!selectedProjectId}
@@ -655,7 +753,17 @@ export default function ChatWindow({
         </aside>
       )}
 
-      <footer className={`absolute bottom-0 left-0 ${activeWorkspace ? "right-[44%]" : "right-0"} bg-gradient-to-t from-white via-white to-white/0 px-6 pb-5 pt-10 max-md:px-4`}>
+      {!activeWorkspace && (
+        <UsageOverviewPanel
+          stats={overviewStats}
+          selectedModel={selectedModel}
+          sessionDuration={formatDuration(now - sessionStartedAt)}
+          streamingDuration={isStreaming ? formatDuration(now - sessionStartedAt) : "-"}
+          isStreaming={isStreaming}
+        />
+      )}
+
+      <footer className={`absolute bottom-0 left-0 ${activeWorkspace ? "right-[44%]" : "right-0 xl:right-80"} bg-gradient-to-t from-white via-white to-white/0 px-6 pb-5 pt-10 max-md:px-4`}>
         <form
           onSubmit={handleSubmit}
           className={`shadow-box mx-auto rounded-2xl border border-slate-200 bg-white p-2 ${activeWorkspace ? "max-w-[calc(100%-48px)]" : "max-w-[760px]"}`}
@@ -676,12 +784,23 @@ export default function ChatWindow({
             onChange={(event) => void handleFolderSelection(event.target.files)}
             {...{ webkitdirectory: "", directory: "" }}
           />
-          {(attachments.length > 0 || activeWorkspace || searchMode || webSearch || selectedModel) && (
+          <input
+            ref={projectDocInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            accept=".txt,.md,.json,.csv,.log,text/*,application/json"
+            onChange={(event) => void handleProjectDocumentSelection(event.target.files)}
+          />
+          {(attachments.length > 0 || activeWorkspace || searchMode || webSearch || orchestrate || selectedModel) && (
             <div className="mb-1 flex flex-wrap items-center gap-1.5 px-2 pt-1">
               <StatusChip label={`Agent: ${AGENT_LABELS[selectedAgentId] ?? "General"}`} />
               <StatusChip label={`Model: ${selectedModel}`} />
               {selectedProjectId && (
-                <StatusChip label={`Project: ${projects.find((project) => project.id === selectedProjectId)?.name ?? "Active"}`} />
+                <>
+                  <StatusChip label={`Project: ${projects.find((project) => project.id === selectedProjectId)?.name ?? "Active"}`} />
+                  <StatusChip label={`${projectDocuments.length} knowledge doc${projectDocuments.length === 1 ? "" : "s"}`} />
+                </>
               )}
               {activeWorkspace && (
                 <StatusChip
@@ -690,6 +809,7 @@ export default function ChatWindow({
               )}
               {searchMode && <StatusChip label="Search mode" />}
               {webSearch && <StatusChip label="Web lookup" />}
+              {orchestrate && <StatusChip label="Multi-agent orchestration" />}
               {attachments.map((attachment, index) => (
                 <button
                   key={`${attachment.name}-${index}`}
@@ -730,12 +850,29 @@ export default function ChatWindow({
             />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1">
-              <ProjectSelect
-                projects={projects}
-                selectedProjectId={selectedProjectId}
-                onSelectProject={onSelectProject}
-                disabled={isStreaming}
-              />
+              {selectedProjectId && (
+                <>
+                  <div
+                    className="flex h-8 max-w-44 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 text-sm text-slate-700"
+                    title="Active project"
+                  >
+                    <FileText className="h-4 w-4 shrink-0" />
+                    <span className="truncate">
+                      {projects.find((project) => project.id === selectedProjectId)?.name ?? "Project"}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isStreaming}
+                    onClick={() => projectDocInputRef.current?.click()}
+                    className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-700 transition hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+                    title="Upload project source"
+                  >
+                    <UploadCloud className="h-4 w-4" />
+                    <span className="max-md:hidden">Sources</span>
+                  </button>
+                </>
+              )}
               <ModelSelect
                 models={models}
                 selectedModel={selectedModel}
@@ -770,6 +907,12 @@ export default function ChatWindow({
                 active={webSearch}
                 onClick={onToggleWebSearch}
               />
+              <PillButton
+                icon={<BrainCircuit className="h-4 w-4" />}
+                label="Orchestrate"
+                active={orchestrate}
+                onClick={onToggleOrchestrate}
+              />
             </div>
             <div className="flex items-center gap-1">
               <IconButton
@@ -791,6 +934,161 @@ export default function ChatWindow({
         </form>
       </footer>
     </main>
+  );
+}
+
+interface UsageOverviewStats {
+  activeFlags: number;
+  completionTokens: number;
+  contextPercent: number;
+  fileContextTokens: number;
+  promptTokens: number;
+  reasoningTokens: number;
+  requestCount: number;
+  totalTokens: number;
+}
+
+function UsageOverviewPanel({
+  stats,
+  selectedModel,
+  sessionDuration,
+  streamingDuration,
+  isStreaming,
+}: {
+  stats: UsageOverviewStats;
+  selectedModel: string;
+  sessionDuration: string;
+  streamingDuration: string;
+  isStreaming: boolean;
+}) {
+  const contextHealth =
+    stats.contextPercent >= 85
+      ? "Tight"
+      : stats.contextPercent >= 65
+        ? "Many files"
+        : "Healthy";
+  const ringBackground = `conic-gradient(rgb(15 23 42) ${stats.contextPercent}%, rgb(226 232 240) 0)`;
+
+  return (
+    <aside className="absolute bottom-0 right-0 top-0 hidden w-80 flex-col border-l border-slate-200 bg-white xl:flex">
+      <div className="flex h-14 items-center gap-2 border-b border-slate-200 px-4">
+        <Activity className="h-4 w-4 text-slate-700" />
+        <p className="text-sm font-semibold text-slate-950">Overview</p>
+      </div>
+
+      <div className="flex-1 space-y-3 overflow-auto bg-slate-50 p-3">
+        <OverviewSection icon={<Gauge className="h-4 w-4" />} title="Context window">
+          <div className="flex flex-col items-center gap-3">
+            <div
+              className="flex h-36 w-36 items-center justify-center rounded-full p-4"
+              style={{ background: ringBackground }}
+            >
+              <div className="flex h-full w-full flex-col items-center justify-center rounded-full bg-white">
+                <p className="text-3xl font-semibold text-slate-950">{stats.contextPercent}%</p>
+                <p className="text-xs text-slate-500">context used</p>
+              </div>
+            </div>
+            <p className="font-mono text-xs text-slate-700">
+              {formatCompact(stats.totalTokens)} / {formatCompact(CONTEXT_LIMIT_TOKENS)} tokens
+            </p>
+          </div>
+
+          <div className="mt-4 space-y-2">
+            <MeterRow label="Prompt" value={stats.promptTokens} colorClassName="bg-cyan-500" />
+            <MeterRow label="Completion" value={stats.completionTokens} colorClassName="bg-blue-500" />
+            <MeterRow label="Reasoning" value={stats.reasoningTokens} colorClassName="bg-orange-500" />
+            <MeterRow label="Other" value={stats.fileContextTokens} colorClassName="bg-slate-300" />
+          </div>
+        </OverviewSection>
+
+        <OverviewSection icon={<Clock className="h-4 w-4" />} title="Runtime">
+          <div className="grid grid-cols-2 gap-2">
+            <StatTile label="Time" value={sessionDuration} />
+            <StatTile label="Streaming" value={streamingDuration} detail={isStreaming ? "active" : "idle"} />
+            <StatTile label="Requests" value={formatInteger(stats.requestCount)} />
+            <StatTile label="Tools" value={formatInteger(stats.activeFlags)} detail="enabled" />
+          </div>
+        </OverviewSection>
+
+        <OverviewSection icon={<CreditCard className="h-4 w-4" />} title="Cost">
+          <div className="grid grid-cols-2 gap-2">
+            <StatTile label="Session cost" value="-" detail="usage API needed" />
+            <StatTile label="Cache hit" value="-" detail="not exposed" />
+          </div>
+          <p className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-500">
+            Token counts update live here. Exact billed cost needs backend usage metadata from the provider stream.
+          </p>
+        </OverviewSection>
+
+        <OverviewSection icon={<Terminal className="h-4 w-4" />} title="Session status">
+          <div className="grid grid-cols-2 gap-2">
+            <StatTile label="Context health" value={contextHealth} />
+            <StatTile label="Compaction" value={`${Math.max(0, 100 - stats.contextPercent)}%`} />
+          </div>
+          <p className="mt-2 truncate rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-500">
+            {selectedModel || "No model selected"}
+          </p>
+        </OverviewSection>
+      </div>
+    </aside>
+  );
+}
+
+function OverviewSection({
+  icon,
+  title,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+      <div className="mb-3 flex items-center gap-2 text-slate-700">
+        {icon}
+        <p className="text-sm font-semibold text-slate-950">{title}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function MeterRow({
+  label,
+  value,
+  colorClassName,
+}: {
+  label: string;
+  value: number;
+  colorClassName: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 text-sm">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className={`h-2 w-2 rounded-full ${colorClassName}`} />
+        <span className="truncate text-slate-600">{label}</span>
+      </div>
+      <span className="font-mono text-xs text-slate-700">{formatInteger(value)}</span>
+    </div>
+  );
+}
+
+function StatTile({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
+      <p className="truncate text-xs text-slate-500">{label}</p>
+      <p className="truncate text-lg font-semibold text-slate-950">{value}</p>
+      {detail && <p className="truncate text-xs text-slate-400">{detail}</p>}
+    </div>
   );
 }
 
@@ -823,39 +1121,6 @@ function ModelSelect({
         {options.map((model) => (
           <option key={model.id} value={model.id}>
             {model.label}
-          </option>
-        ))}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-2 h-3.5 w-3.5 text-slate-500" />
-    </label>
-  );
-}
-
-function ProjectSelect({
-  projects,
-  selectedProjectId,
-  onSelectProject,
-  disabled,
-}: {
-  projects: Project[];
-  selectedProjectId: string;
-  onSelectProject: (projectId: string) => void;
-  disabled: boolean;
-}) {
-  return (
-    <label className="relative flex h-8 items-center">
-      <span className="sr-only">Project</span>
-      <select
-        value={selectedProjectId}
-        disabled={disabled}
-        onChange={(event) => onSelectProject(event.target.value)}
-        className="h-8 max-w-44 appearance-none rounded-lg border border-slate-200 bg-white py-0 pl-2.5 pr-7 text-sm text-slate-700 outline-none transition hover:bg-slate-50 focus:border-slate-400 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 max-md:max-w-32"
-        title="Select project"
-      >
-        <option value="">No project</option>
-        {projects.map((project) => (
-          <option key={project.id} value={project.id}>
-            {project.name}
           </option>
         ))}
       </select>

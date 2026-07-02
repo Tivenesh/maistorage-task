@@ -12,6 +12,9 @@ services:
       - DATABASE_URL=sqlite:////app/data/chats.db
       - GOOGLE_AI_API_KEY=${GOOGLE_AI_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-}
+      - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-}
     restart: always
 
   frontend:

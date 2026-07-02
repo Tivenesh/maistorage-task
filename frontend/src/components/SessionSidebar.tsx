@@ -1,12 +1,13 @@
 "use client";
 
 import Image from "next/image";
-import { Bot, Code2, FolderPlus, Globe, MessageSquare, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Trash2 } from "lucide-react";
+import { BookOpen, Bot, Code2, FolderPlus, Globe, MessageSquare, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Trash2 } from "lucide-react";
 import type { AgentConfig, Project } from "@/app/page";
 
 interface Session {
   id: string;
   title: string;
+  project_id?: string | null;
   created_at: string;
 }
 
@@ -20,8 +21,10 @@ interface SessionSidebarProps {
   onSelectAgent: (id: string) => void;
   agents: AgentConfig[];
   projects: Project[];
+  selectedProjectId: string;
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  onSelectProject: (projectId: string) => void;
   onOpenAgents: () => void;
   onOpenProject: () => void;
   onOpenSettings: () => void;
@@ -44,8 +47,10 @@ export default function SessionSidebar({
   onSelectAgent,
   agents,
   projects,
+  selectedProjectId,
   collapsed,
   onToggleCollapsed,
+  onSelectProject,
   onOpenAgents,
   onOpenProject,
   onOpenSettings,
@@ -156,10 +161,11 @@ export default function SessionSidebar({
           {projects.map((project) => (
             <SidebarItem
               key={project.id}
-              icon={<FolderPlus className="h-4 w-4" />}
+              icon={<BookOpen className="h-4 w-4" />}
               label={project.name}
-              muted
+              selected={project.id === selectedProjectId && !currentSessionId}
               collapsed={collapsed}
+              onClick={() => onSelectProject(project.id)}
             />
           ))}
         </SidebarSection>
@@ -188,7 +194,11 @@ export default function SessionSidebar({
                     onClick={() => onSelectSession(session.id)}
                     className={`flex min-w-0 flex-1 items-center gap-2 text-left ${collapsed ? "justify-center" : ""}`}
                   >
-                    <MessageSquare className="h-4 w-4 shrink-0 text-slate-400" />
+                    {session.project_id ? (
+                      <BookOpen className="h-4 w-4 shrink-0 text-slate-400" />
+                    ) : (
+                      <MessageSquare className="h-4 w-4 shrink-0 text-slate-400" />
+                    )}
                     {!collapsed && <span className="truncate">{session.title}</span>}
                   </button>
 

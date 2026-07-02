@@ -1,6 +1,10 @@
 import datetime
 from typing import List, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Upper bound on a single chat message; keeps a pathological client from
+# pushing megabytes through the stream endpoint and into the provider prompt.
+MAX_MESSAGE_CHARS = 32_000
 
 class MessageBase(BaseModel):
     role: str
@@ -21,10 +25,12 @@ class SessionBase(BaseModel):
 
 class SessionCreate(BaseModel):
     title: Optional[str] = "New Conversation"
+    project_id: Optional[str] = None
 
 class SessionResponse(BaseModel):
     id: str
     title: str
+    project_id: Optional[str] = None
     created_at: datetime.datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -144,12 +150,70 @@ class SettingsResponse(BaseModel):
     sidebar_collapsed: bool
     default_model: str
 
+class ChatRunResponse(BaseModel):
+    id: str
+    session_id: str
+    model: str
+    provider: str
+    project_id: Optional[str]
+    orchestrated: bool
+    status: str
+    prompt_chars: int
+    response_chars: int
+    duration_ms: int
+    error: str
+    created_at: datetime.datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class HealthResponse(BaseModel):
+    status: str
+    database: str
+    configured_model: str
+    gemini_api_configured: bool
+    sessions: int
+    messages: int
+    runs: int
+
+class MetricsResponse(BaseModel):
+    sessions: int
+    messages: int
+    projects: int
+    project_documents: int
+    document_chunks: int
+    workspaces: int
+    providers: int
+    runs_total: int
+    runs_completed: int
+    runs_error: int
+    average_duration_ms: int
+
+class SessionExportResponse(BaseModel):
+    session_id: str
+    title: str
+    markdown: str
+
+class QualityReportResponse(BaseModel):
+    session_id: str
+    status: str
+    checks: dict
+    score: int
+    recommendations: List[str]
+
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
     agent_id: str = "general"
     model: Optional[str] = None
     provider_id: Optional[str] = None
     project_id: Optional[str] = None
     search_mode: bool = False
     web_search: bool = False
+    orchestrate: bool = False
     attachments: List[AttachmentPayload] = Field(default_factory=list)
+
+    @field_validator("message")
+    @classmethod
+    def message_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message must not be blank")
+        return value
