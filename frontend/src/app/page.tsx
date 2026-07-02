@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import SessionSidebar from "@/components/SessionSidebar";
 import ChatWindow from "@/components/ChatWindow";
 import ProjectWorkspace from "@/components/ProjectWorkspace";
@@ -28,6 +28,7 @@ export interface AttachmentPayload {
 export interface ModelOption {
   id: string;
   label: string;
+  providerId?: string;
 }
 
 export interface ProviderConfig {
@@ -109,6 +110,9 @@ function parseSseFrame(rawFrame: string): SseFrame | null {
   };
 }
 
+// Displayed model list = discovered base models plus one entry per saved
+// provider (tagged with providerId so the chat can route to that saved key).
+// Derived fresh from providers, so removing a provider drops its model too.
 function mergeProviderModels(
   baseModels: ModelOption[],
   providerConfigs: ProviderConfig[]
@@ -120,19 +124,8 @@ function mergeProviderModels(
     modelsById.set(provider.default_model, {
       id: provider.default_model,
       label: `${provider.default_model} (${provider.display_name})`,
+      providerId: provider.id,
     });
-  }
-
-  return Array.from(modelsById.values());
-}
-
-function mergeModels(primaryModels: ModelOption[], fallbackModels: ModelOption[]): ModelOption[] {
-  const modelsById = new Map(primaryModels.map((model) => [model.id, model]));
-
-  for (const model of fallbackModels) {
-    if (!modelsById.has(model.id)) {
-      modelsById.set(model.id, model);
-    }
   }
 
   return Array.from(modelsById.values());
@@ -144,7 +137,7 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState("general");
-  const [models, setModels] = useState<ModelOption[]>([]);
+  const [baseModels, setBaseModels] = useState<ModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState("models/gemini-3.1-pro-preview");
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
@@ -162,6 +155,12 @@ export default function Home() {
   const [searchMode, setSearchMode] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [orchestrate, setOrchestrate] = useState(false);
+
+  // Model list is derived, not stored, so provider add/remove stays consistent.
+  const models = useMemo(
+    () => mergeProviderModels(baseModels, providers),
+    [baseModels, providers]
+  );
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -183,16 +182,7 @@ export default function Home() {
       }
 
       const data: ModelOption[] = await res.json();
-      let nextModels: ModelOption[] = data;
-      setModels((current) => {
-        nextModels = mergeModels(data, current);
-        return nextModels;
-      });
-      if (nextModels.length > 0) {
-        setSelectedModel((current) =>
-          nextModels.some((model) => model.id === current) ? current : nextModels[0].id
-        );
-      }
+      setBaseModels(data);
     } catch (err) {
       console.error("Failed to fetch models:", err);
     }
@@ -210,9 +200,7 @@ export default function Home() {
         ]);
 
       if (providersRes.ok) {
-        const providerData: ProviderConfig[] = await providersRes.json();
-        setProviders(providerData);
-        setModels((current) => mergeProviderModels(current, providerData));
+        setProviders(await providersRes.json());
       }
       if (agentsRes.ok) setAgents(await agentsRes.json());
       if (projectsRes.ok) setProjects(await projectsRes.json());
@@ -272,6 +260,15 @@ export default function Home() {
 
     return () => window.clearTimeout(timeoutId);
   }, [fetchModels, fetchSessions, fetchWorkspaceState]);
+
+  // Keep the selected model valid as the available list changes (e.g. after a
+  // provider is added or removed). Preserves the choice when still available.
+  useEffect(() => {
+    if (models.length === 0) return;
+    setSelectedModel((current) =>
+      models.some((model) => model.id === current) ? current : models[0].id
+    );
+  }, [models]);
 
   // Fetch messages whenever current session changes
   useEffect(() => {
@@ -373,7 +370,9 @@ export default function Home() {
           message: messageText,
           agent_id: selectedAgentId,
           model: selectedModel,
-          provider_id: providers.find((provider) => provider.default_model === selectedModel)?.id,
+          provider_id:
+            models.find((model) => model.id === selectedModel)?.providerId ??
+            providers.find((provider) => provider.default_model === selectedModel)?.id,
           project_id: selectedProjectId || null,
           search_mode: searchMode,
           web_search: webSearch,
@@ -504,6 +503,12 @@ export default function Home() {
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error("Failed to save provider");
+    await fetchWorkspaceState();
+  };
+
+  const deleteProvider = async (providerId: string) => {
+    const res = await fetch(`${API_URL}/providers/${providerId}`, { method: "DELETE" });
+    if (!res.ok) throw new Error("Failed to delete provider");
     await fetchWorkspaceState();
   };
 
@@ -645,6 +650,7 @@ export default function Home() {
         settings={settings}
         workspaces={workspaces}
         onSaveProvider={saveProvider}
+        onDeleteProvider={deleteProvider}
         onSaveAgent={saveAgent}
         onSaveProject={saveProject}
         onSaveSettings={saveSettings}

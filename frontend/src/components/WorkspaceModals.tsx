@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { Bot, FolderPlus, KeyRound, Settings, X } from "lucide-react";
+import { Bot, FolderPlus, KeyRound, Settings, Trash2, X } from "lucide-react";
 import type { AgentConfig, ModelOption, Project, ProviderConfig, WorkspaceState } from "@/app/page";
 
 export type ModalMode = "settings" | "agent" | "project";
@@ -22,6 +22,7 @@ interface WorkspaceModalsProps {
   settings: AppSettings;
   workspaces: WorkspaceState[];
   onSaveProvider: (payload: Record<string, string>) => Promise<void>;
+  onDeleteProvider: (providerId: string) => Promise<void>;
   onSaveAgent: (payload: Record<string, string | null>) => Promise<void>;
   onSaveProject: (payload: { name: string; description: string }) => Promise<void>;
   onSaveSettings: (payload: Partial<AppSettings>) => Promise<void>;
@@ -46,6 +47,7 @@ export default function WorkspaceModals({
   settings,
   workspaces,
   onSaveProvider,
+  onDeleteProvider,
   onSaveAgent,
   onSaveProject,
   onSaveSettings,
@@ -101,6 +103,7 @@ export default function WorkspaceModals({
               workspaces={workspaces}
               onSaveSettings={(payload) => run(() => onSaveSettings(payload))}
               onSaveProvider={(payload) => run(() => onSaveProvider(payload))}
+              onDeleteProvider={(providerId) => run(() => onDeleteProvider(providerId))}
             />
           )}
 
@@ -148,6 +151,7 @@ function SettingsPanel({
   workspaces,
   onSaveSettings,
   onSaveProvider,
+  onDeleteProvider,
 }: {
   settings: AppSettings;
   providers: ProviderConfig[];
@@ -155,6 +159,7 @@ function SettingsPanel({
   workspaces: WorkspaceState[];
   onSaveSettings: (payload: Partial<AppSettings>) => Promise<void>;
   onSaveProvider: (payload: Record<string, string>) => Promise<void>;
+  onDeleteProvider: (providerId: string) => Promise<void>;
 }) {
   const [provider, setProvider] = useState(PROVIDERS[0].id);
   const providerMeta = PROVIDERS.find((item) => item.id === provider) ?? PROVIDERS[0];
@@ -251,9 +256,20 @@ function SettingsPanel({
                   <div className="font-medium text-slate-800">{item.display_name}</div>
                   <div className="text-xs text-slate-500">{item.provider} / {item.default_model}</div>
                 </div>
-                <span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-xs text-slate-500">
-                  {item.api_key_preview}
-                </span>
+                <div className="flex items-center gap-2 md:justify-end">
+                  <span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-xs text-slate-500">
+                    {item.api_key_preview}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteProvider(item.id)}
+                    aria-label={`Delete ${item.display_name} key`}
+                    title="Delete saved key"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-400 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             ))
           )}
