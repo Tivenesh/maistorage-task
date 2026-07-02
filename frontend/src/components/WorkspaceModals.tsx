@@ -175,7 +175,19 @@ function SettingsPanel({
 
   return (
     <div className="space-y-6">
-      <Header icon={<Settings className="h-5 w-5" />} title="Settings" description="Configure models, providers, theme, and local workspace state." />
+      <Header icon={<Settings className="h-5 w-5" />} title="Settings" description="Configure local model providers, app defaults, and workspace state." />
+
+      <section className="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+        <div className="flex items-start gap-3">
+          <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-emerald-700" />
+          <div>
+            <h3 className="text-sm font-semibold text-emerald-950">Bring your own API key</h3>
+            <p className="mt-1 text-sm leading-6 text-emerald-800">
+              Keys entered here are saved only in this local SQLite database and are never sent back to the browser after saving. The UI shows only a preview, and a fresh clone starts with no real key.
+            </p>
+          </div>
+        </div>
+      </section>
 
       <section className="rounded-lg border border-slate-200 p-4">
         <h3 className="mb-3 text-sm font-semibold text-slate-950">Account Config</h3>
@@ -219,8 +231,8 @@ function SettingsPanel({
             </select>
           </label>
           <Field name="display_name" label="Display name" placeholder={providerMeta.label} />
-          <Field name="api_key" label="API key" placeholder="Paste provider API key" type="password" />
-          <Field name="default_model" label="Default model" placeholder={providerMeta.defaultModel} />
+          <Field name="api_key" label="Their API key" placeholder="Paste your provider key" type="password" />
+          <Field name="default_model" label="Model to show in chat" placeholder={providerMeta.defaultModel} />
           <Field name="base_url" label="Base URL" placeholder="Optional for OpenAI-compatible providers" />
           <div className="flex items-end">
             <button type="submit" className="h-9 rounded-lg bg-slate-900 px-4 text-sm font-medium text-white hover:bg-slate-700">Save provider</button>
@@ -228,12 +240,23 @@ function SettingsPanel({
         </form>
 
         <div className="mt-4 grid gap-2">
-          {providers.map((item) => (
-            <div key={item.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
-              <span className="font-medium text-slate-800">{item.display_name}</span>
-              <span className="text-slate-500">{item.provider} / {item.api_key_preview}</span>
-            </div>
-          ))}
+          {providers.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-slate-200 px-3 py-2 text-sm text-slate-500">
+              No local provider key saved. The app will use environment variables if configured, otherwise it falls back to the offline demo model.
+            </p>
+          ) : (
+            providers.map((item) => (
+              <div key={item.id} className="grid gap-1 rounded-lg bg-slate-50 px-3 py-2 text-sm md:grid-cols-[1fr_auto] md:items-center">
+                <div>
+                  <div className="font-medium text-slate-800">{item.display_name}</div>
+                  <div className="text-xs text-slate-500">{item.provider} / {item.default_model}</div>
+                </div>
+                <span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-xs text-slate-500">
+                  {item.api_key_preview}
+                </span>
+              </div>
+            ))
+          )}
         </div>
       </section>
 

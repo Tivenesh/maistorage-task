@@ -1,4 +1,4 @@
-# STATE.md � Live Agent Context
+﻿# STATE.md — Live Agent Context
 
 ## Active Session
 - **Project:** maistorage-task
@@ -18,12 +18,13 @@
 - [x] Notebook-style project UX: sidebar project opens source workspace; multiple chats share universal project files
 - [x] Docker RAG fix: non-empty `GEMINI_EMBEDDING_MODEL` default verified in containers
 - [x] Frontend Docker fix: lockfile regenerated for `npm ci`; `.dockerignore` added
+- [x] Reviewer API-key path: sidebar API Keys entry, local provider storage, provider models selectable in chat
 
 ## Last Agent
 - **Agent:** codex
-- **File:** frontend/src/components/ProjectWorkspace.tsx
-- **Line:** notebook-style project workspace added and Docker build verified
-- **Next:** Manual browser demo: create/select project, upload `runbook.md`, start multiple project chats, verify all chats cite shared sources
+- **File:** frontend/src/components/WorkspaceModals.tsx
+- **Line:** API-key setup callout and saved-provider cards added
+- **Next:** Manual browser demo: use API Keys panel with reviewer key, upload `runbook.md`, verify cited RAG answer
 
 ## Decisions
 - 2026-06-27: Migrated from deprecated `google.generativeai` to `google.genai` SDK
@@ -34,3 +35,6 @@
 - 2026-07-03: Replaced the project dropdown demo path with a NotebookLM/Gemini-style project workspace so shared sources are uploaded once and reused across project chats.
 - 2026-07-03: Verified `docker compose up --build -d` after frontend lockfile, `.dockerignore`, and embedding-model environment fixes.
 - 2026-07-03: `init-project`/STATE discipline is documented in `AGENTS.md` but not enforced by hooks or CI in this checkout.
+- 2026-07-03: Added explicit reviewer API-key setup in the UI and README; no real API key is committed, and provider responses expose only previews.
+
+

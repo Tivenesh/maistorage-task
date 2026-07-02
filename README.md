@@ -82,6 +82,17 @@ CORS_ALLOW_ORIGINS=       # optional, defaults to localhost:3000
 
 The backend auto-loads `.env` on startup (no `export` step needed); variables already present in the real environment take precedence. Do not commit real API keys. The app works without keys through the clearly-labeled offline fallback.
 
+### API Key Safety And Reviewer Setup
+
+No real API key is committed to this repository. `.env` is gitignored, `.env.example` contains blank placeholders only, and saved provider keys are returned to the frontend only as previews such as `abcd...wxyz`.
+
+Reviewers can use their own key in either of these ways:
+
+1. Environment setup: copy `.env.example` to `.env`, set `GOOGLE_AI_API_KEY` or `GEMINI_API_KEY`, then restart the backend.
+2. In-app setup: open `http://localhost:3000`, click **API Keys** in the sidebar, choose a provider, paste their key, and save. The provider's default model then appears in the chat model selector and requests are sent through that saved provider config.
+
+For Docker, pass keys through environment variables or a local `.env` file. Do not bake keys into the image.
+
 ## Docker
 
 ```bash

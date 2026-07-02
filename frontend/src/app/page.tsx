@@ -109,6 +109,35 @@ function parseSseFrame(rawFrame: string): SseFrame | null {
   };
 }
 
+function mergeProviderModels(
+  baseModels: ModelOption[],
+  providerConfigs: ProviderConfig[]
+): ModelOption[] {
+  const modelsById = new Map(baseModels.map((model) => [model.id, model]));
+
+  for (const provider of providerConfigs) {
+    if (!provider.default_model) continue;
+    modelsById.set(provider.default_model, {
+      id: provider.default_model,
+      label: `${provider.default_model} (${provider.display_name})`,
+    });
+  }
+
+  return Array.from(modelsById.values());
+}
+
+function mergeModels(primaryModels: ModelOption[], fallbackModels: ModelOption[]): ModelOption[] {
+  const modelsById = new Map(primaryModels.map((model) => [model.id, model]));
+
+  for (const model of fallbackModels) {
+    if (!modelsById.has(model.id)) {
+      modelsById.set(model.id, model);
+    }
+  }
+
+  return Array.from(modelsById.values());
+}
+
 export default function Home() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -154,10 +183,14 @@ export default function Home() {
       }
 
       const data: ModelOption[] = await res.json();
-      setModels(data);
-      if (data.length > 0) {
+      let nextModels: ModelOption[] = data;
+      setModels((current) => {
+        nextModels = mergeModels(data, current);
+        return nextModels;
+      });
+      if (nextModels.length > 0) {
         setSelectedModel((current) =>
-          data.some((model) => model.id === current) ? current : data[0].id
+          nextModels.some((model) => model.id === current) ? current : nextModels[0].id
         );
       }
     } catch (err) {
@@ -176,7 +209,11 @@ export default function Home() {
           fetch(`${API_URL}/workspaces`),
         ]);
 
-      if (providersRes.ok) setProviders(await providersRes.json());
+      if (providersRes.ok) {
+        const providerData: ProviderConfig[] = await providersRes.json();
+        setProviders(providerData);
+        setModels((current) => mergeProviderModels(current, providerData));
+      }
       if (agentsRes.ok) setAgents(await agentsRes.json());
       if (projectsRes.ok) setProjects(await projectsRes.json());
       if (settingsRes.ok) {

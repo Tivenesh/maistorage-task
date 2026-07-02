@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { BookOpen, Bot, Code2, FolderPlus, Globe, MessageSquare, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Trash2 } from "lucide-react";
+import { BookOpen, Bot, Code2, FolderPlus, Globe, KeyRound, MessageSquare, PanelLeftClose, PanelLeftOpen, Search, Settings, SquarePen, Trash2 } from "lucide-react";
 import type { AgentConfig, Project } from "@/app/page";
 
 interface Session {
@@ -116,6 +116,14 @@ export default function SessionSidebar({
         >
           <Search className="h-4 w-4" />
           {!collapsed && "Search Chats"}
+        </button>
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className={`flex h-9 w-full items-center gap-2 rounded-lg px-3 text-sm text-slate-700 transition hover:bg-slate-200/70 ${collapsed ? "justify-center" : ""}`}
+        >
+          <KeyRound className="h-4 w-4" />
+          {!collapsed && "API Keys"}
         </button>
       </div>
 
