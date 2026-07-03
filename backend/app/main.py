@@ -486,6 +486,25 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     db.refresh(project)
     return project
 
+@app.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_project(project_id: str, db: Session = Depends(get_db)):
+    """
+    Deletes a project along with its documents and vector chunks (via ORM
+    cascade). Chat sessions that belonged to the project are preserved but
+    unlinked (their project_id is cleared) so conversation history is not lost.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    db.query(ChatSession).filter(ChatSession.project_id == project_id).update(
+        {ChatSession.project_id: None}, synchronize_session=False
+    )
+    db.delete(project)
+    db.commit()
+    logger.info(f"Deleted project: {project_id}")
+    return None
+
 @app.get("/projects/{project_id}/documents", response_model=list[ProjectDocumentResponse])
 def list_project_documents(project_id: str, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()

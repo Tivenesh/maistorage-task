@@ -281,7 +281,7 @@ export default function Home() {
   const [searchMode, setSearchMode] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [orchestrate, setOrchestrate] = useState(false);
-  const [morphActive, setMorphActive] = useState(false);
+  const themeAnimatingRef = useRef(false);
   const [overviewTelemetry, setOverviewTelemetry] = useState<SessionOverviewTelemetry>(() =>
     emptyOverviewTelemetry()
   );
@@ -470,39 +470,75 @@ export default function Home() {
     return () => window.clearTimeout(timeoutId);
   }, [fetchProjectDocuments, selectedProjectId]);
 
-  const handleThemeChange = useCallback((newTheme: string) => {
-    const el = document.querySelector(".maistorage-app");
-    if (!el) return;
+  // Persist and apply the theme to React state (drives data-theme on the app).
+  const applyThemeState = useCallback((theme: string) => {
+    setSettings((current) => ({ ...current, theme }));
+    void fetch(`${API_URL}/settings`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ theme }),
+    }).catch(() => {});
+  }, []);
 
-    const currentTheme = el.getAttribute("data-theme") || "dark";
-    if (currentTheme === newTheme) return;
+  // Smooth colour crossfade theme transition: a full-screen wash of the target
+  // theme's palette fades in over the current one (so the colours blend), the
+  // theme is swapped at peak opacity (hidden), then the wash fades back out to
+  // settle into the new theme. No moving panels — just colour integrating.
+  // Uses the Web Animations API (not CSS transitions) so it cannot be zeroed out
+  // by the global reduced-motion transition override in globals.css; this is a
+  // deliberate, user-initiated brand transition.
+  const runThemeCrossfade = useCallback((newTheme: string) => {
+    const canAnimate =
+      typeof document !== "undefined" &&
+      typeof Element !== "undefined" &&
+      "animate" in Element.prototype;
 
-    el.classList.add("theme-morph");
-    setMorphActive(true);
+    if (!canAnimate || themeAnimatingRef.current) {
+      applyThemeState(newTheme);
+      return;
+    }
+    themeAnimatingRef.current = true;
 
-    const rect = toggleRef.current?.getBoundingClientRect();
-    const originX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
-    const originY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+    const FADE_IN_MS = 460;
+    const HOLD_MS = 90;
+    const FADE_OUT_MS = 520;
+    const easing = "cubic-bezier(0.4, 0, 0.2, 1)";
 
-    const fromBg = currentTheme === "dark" ? DARK_BG : LIGHT_BG;
+    const wash = document.createElement("div");
+    wash.setAttribute("aria-hidden", "true");
+    Object.assign(wash.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "2147483000",
+      pointerEvents: "none",
+      background: newTheme === "dark" ? DARK_BG : LIGHT_BG,
+      opacity: "0",
+      willChange: "opacity",
+    });
+    document.body.appendChild(wash);
 
-    const container = document.createElement("div");
-    container.className = "theme-reveal-container";
-    const bg = document.createElement("div");
-    bg.className = "theme-reveal-bg";
-    bg.style.background = fromBg;
-    bg.style.transformOrigin = `${originX}px ${originY}px`;
-    container.appendChild(bg);
-    document.body.appendChild(container);
+    // The sequence (swap + cleanup) is driven by timers so it always completes
+    // correctly, even if the animation's callbacks are starved. The Web
+    // Animations API supplies the smooth opacity crossfade itself.
+    wash.animate([{ opacity: 0 }, { opacity: 1 }], {
+      duration: FADE_IN_MS,
+      easing,
+      fill: "forwards",
+    });
 
-    el.setAttribute("data-theme", newTheme);
-    document.documentElement.dataset.theme = newTheme;
-
-    setTimeout(() => {
-      setMorphActive(false);
-      container.remove();
-    }, 500);
-  }, [toggleRef]);
+    window.setTimeout(() => {
+      applyThemeState(newTheme); // swap theme at peak opacity (new palette covers)
+      wash.animate([{ opacity: 1 }, { opacity: 0 }], {
+        duration: FADE_OUT_MS,
+        easing,
+        fill: "forwards",
+      });
+      window.setTimeout(() => {
+        wash.remove();
+        themeAnimatingRef.current = false;
+      }, FADE_OUT_MS + HOLD_MS);
+    }, FADE_IN_MS + HOLD_MS);
+  }, [applyThemeState]);
 
   const createSession = async (projectId?: string | null): Promise<Session | null> => {
     try {
@@ -544,6 +580,23 @@ export default function Home() {
       }
     } catch (err) {
       console.error("Failed to delete session:", err);
+    }
+  };
+
+  const handleDeleteProject = async (projectId: string) => {
+    try {
+      const res = await fetch(`${API_URL}/projects/${projectId}`, { method: "DELETE" });
+      if (res.ok) {
+        setProjects((prev) => prev.filter((p) => p.id !== projectId));
+        if (selectedProjectId === projectId) {
+          setSelectedProjectId("");
+          setProjectDocuments([]);
+        }
+        // Sessions that belonged to this project are now unlinked server-side.
+        void fetchSessions();
+      }
+    } catch (err) {
+      console.error("Failed to delete project:", err);
     }
   };
 
@@ -910,14 +963,21 @@ export default function Home() {
   };
 
   const saveSettings = async (payload: Partial<AppSettings>) => {
-    if (payload.theme) {
-      handleThemeChange(payload.theme);
+    const { theme, ...rest } = payload;
+
+    // Theme changes run the colour crossfade, which applies + persists the theme
+    // itself at peak opacity (see runThemeCrossfade).
+    if (theme && theme !== settings.theme) {
+      runThemeCrossfade(theme);
     }
-    setSettings((current) => ({ ...current, ...payload }));
+
+    // Persist any non-theme settings immediately.
+    if (Object.keys(rest).length === 0) return;
+    setSettings((current) => ({ ...current, ...rest }));
     const res = await fetch(`${API_URL}/settings`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(rest),
     });
     if (!res.ok) throw new Error("Failed to save settings");
     await fetchWorkspaceState();
@@ -956,7 +1016,7 @@ export default function Home() {
     <MotionConfig transition={spring.soft}>
       <div
         data-theme={settings.theme === "dark" ? "dark" : "light"}
-        className={`maistorage-app relative flex h-[100dvh] w-full overflow-hidden text-[var(--app-text)] max-md:flex-col${morphActive ? " theme-morph" : ""}`}
+        className="maistorage-app relative flex h-[100dvh] w-full overflow-hidden text-[var(--app-text)] max-md:flex-col"
       >
         <MaistorageFieldScene />
         <SmoothScroll />
@@ -981,6 +1041,7 @@ export default function Home() {
             void saveSettings({ theme: settings.theme === "dark" ? "light" : "dark" })
           }
           onSelectProject={handleSelectProject}
+          onDeleteProject={handleDeleteProject}
           onOpenAgents={() => setModalMode("agent")}
           onOpenProject={() => setModalMode("project")}
           onOpenSettings={() => setModalMode("settings")}

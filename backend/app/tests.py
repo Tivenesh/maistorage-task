@@ -685,6 +685,42 @@ def test_trim_history_keeps_newest_messages_within_budget():
     huge = [{"role": "user", "content": "y" * 100_000}]
     assert trim_history_for_model(huge) == huge
 
+def test_delete_project_removes_docs_chunks_and_unlinks_sessions(monkeypatch):
+    from app import rag
+
+    # Deterministic embedding so indexing on upload actually stores chunks.
+    monkeypatch.setattr(
+        rag, "embed_texts", lambda texts, task_type="RETRIEVAL_DOCUMENT": [[1.0, 0.0] for _ in texts]
+    )
+
+    project = client.post("/projects", json={"name": "Deletable", "description": "x"}).json()
+    client.post(
+        f"/projects/{project['id']}/documents",
+        json={"name": "doc.md", "content": "content to chunk and embed"},
+    )
+    session_id = client.post(
+        "/sessions", json={"title": "bound chat", "project_id": project["id"]}
+    ).json()["id"]
+
+    assert client.get("/metrics").json()["document_chunks"] >= 1
+
+    assert client.delete(f"/projects/{project['id']}").status_code == 204
+
+    # Project and its documents/chunks are gone (cascade)
+    assert project["id"] not in [p["id"] for p in client.get("/projects").json()]
+    assert client.get(f"/projects/{project['id']}/documents").status_code == 404
+    metrics = client.get("/metrics").json()
+    assert metrics["project_documents"] == 0
+    assert metrics["document_chunks"] == 0
+
+    # The session survives but is unlinked from the deleted project
+    detail = client.get(f"/sessions/{session_id}").json()
+    assert detail["project_id"] is None
+    assert detail["title"] == "bound chat"
+
+def test_delete_missing_project_returns_404():
+    assert client.delete("/projects/does-not-exist").status_code == 404
+
 def test_build_system_instruction_composes_base_agent_and_project_grounding():
     from app.main import build_system_instruction
 

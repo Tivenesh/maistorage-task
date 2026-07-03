@@ -30,6 +30,7 @@ interface SessionSidebarProps {
   onToggleCollapsed: () => void;
   onToggleTheme: () => void;
   onSelectProject: (projectId: string) => void;
+  onDeleteProject: (projectId: string) => void;
   onOpenAgents: () => void;
   onOpenProject: () => void;
   onOpenSettings: () => void;
@@ -59,6 +60,7 @@ export default function SessionSidebar({
   onToggleCollapsed,
   onToggleTheme,
   onSelectProject,
+  onDeleteProject,
   onOpenAgents,
   onOpenProject,
   onOpenSettings,
@@ -254,16 +256,47 @@ export default function SessionSidebar({
             collapsed={collapsed}
             onClick={onOpenProject}
           />
-          {projects.map((project) => (
-            <SidebarItem
-              key={project.id}
-              icon={<BookOpen className="h-4 w-4" />}
-              label={project.name}
-              selected={project.id === selectedProjectId && !currentSessionId}
-              collapsed={collapsed}
-              onClick={() => onSelectProject(project.id)}
-            />
-          ))}
+          <motion.div layout className="space-y-1">
+          <AnimatePresence initial={false} mode="popLayout">
+          {projects.map((project) => {
+            const isSelected = project.id === selectedProjectId && !currentSessionId;
+
+            return (
+              <motion.div
+                key={project.id}
+                layout
+                variants={listItemVariants}
+                initial="hidden"
+                animate="visible"
+                exit="exit"
+                transition={spring.soft}
+                className={`group flex items-center gap-2 rounded-[11px] px-2 py-2 text-sm transition ${
+                  isSelected ? "sidebar-selected text-slate-950" : "rail-button"
+                }`}
+              >
+                <MotionButton
+                  type="button"
+                  onClick={() => onSelectProject(project.id)}
+                  className={`flex min-w-0 flex-1 items-center gap-2 text-left ${collapsed ? "justify-center" : ""}`}
+                >
+                  <BookOpen className="h-4 w-4 shrink-0 text-slate-400" />
+                  <CollapsibleLabel collapsed={collapsed}>{project.name}</CollapsibleLabel>
+                </MotionButton>
+
+                {!collapsed && <MotionButton
+                  type="button"
+                  interaction="icon"
+                  onClick={() => onDeleteProject(project.id)}
+                  className="rounded p-1 text-slate-400 opacity-0 transition hover:bg-white/20 hover:text-red-500 group-hover:opacity-100 max-md:opacity-100"
+                  aria-label={`Delete project ${project.name}`}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </MotionButton>}
+              </motion.div>
+            );
+          })}
+          </AnimatePresence>
+          </motion.div>
         </SidebarSection>
 
         <SidebarSection title="Recents" collapsed={collapsed}>
