@@ -9,3 +9,10 @@ frontend/.next/
 frontend/node_modules/
 __pycache__/
 *.pyc
+
+# Personal interview prep / local demo scaffolding — kept out of the public repo
+SUBMISSION_EMAIL_DRAFT.md
+LIVE_DEMO_SCRIPT.md
+PRESENTATION_PLAN.md
+Design documentation files/
+demo-sources/
