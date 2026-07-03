@@ -1,12 +1,36 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MotionConfig } from "motion/react";
 import SessionSidebar from "@/components/SessionSidebar";
 import ChatWindow from "@/components/ChatWindow";
 import ProjectWorkspace from "@/components/ProjectWorkspace";
 import WorkspaceModals, { ModalMode } from "@/components/WorkspaceModals";
+import AppMotion from "@/components/AppMotion";
+import SmoothScroll from "@/components/SmoothScroll";
+import { spring } from "@/components/MotionControls";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+const DARK_BG = [
+  "radial-gradient(circle at 14% 22%, rgba(34,211,238,0.18), transparent 25rem)",
+  "radial-gradient(circle at 86% 18%, rgba(255,152,26,0.17), transparent 28rem)",
+  "radial-gradient(circle at 50% 115%, rgba(16,43,92,0.38), transparent 34rem)",
+  "linear-gradient(135deg, #04070f 0%, #07101f 48%, #050912 100%)",
+].join(",");
+
+const LIGHT_BG = [
+  "radial-gradient(circle at 15% 20%, rgba(255,152,26,0.17), transparent 25rem)",
+  "radial-gradient(circle at 85% 20%, rgba(16,43,92,0.13), transparent 30rem)",
+  "radial-gradient(circle at 50% 115%, rgba(34,211,238,0.12), transparent 34rem)",
+  "linear-gradient(135deg, #fbfcff 0%, #f2f6fc 48%, #eaf1fb 100%)",
+].join(",");
+
+const MaistorageFieldScene = dynamic(
+  () => import("@/components/MaistorageFieldScene"),
+  { ssr: false }
+);
 
 interface Session {
   id: string;
@@ -84,6 +108,108 @@ interface SseFrame {
   data: string;
 }
 
+interface StreamMetadata {
+  run_id?: string;
+  session_title?: string;
+  model?: string;
+  provider?: string;
+  orchestrated?: boolean;
+  prompt_chars?: number;
+}
+
+interface RunEventPayload {
+  run_id?: string;
+  status?: string;
+  duration_ms?: number;
+  prompt_chars?: number;
+  response_chars?: number;
+  model?: string;
+  provider?: string;
+  orchestrated?: boolean;
+}
+
+interface ChatRunSummary {
+  id: string;
+  session_id: string;
+  model: string;
+  provider: string;
+  project_id?: string | null;
+  orchestrated: boolean;
+  status: string;
+  prompt_chars: number;
+  response_chars: number;
+  duration_ms: number;
+  error: string;
+  created_at: string;
+}
+
+export interface SessionOverviewTelemetry {
+  sessionId: string | null;
+  completedRuntimeMs: number;
+  activeRunStartedAt: number | null;
+  requestCount: number;
+  completedRequests: number;
+  runErrors: number;
+  completedPromptChars: number;
+  activePromptChars: number;
+  completedResponseChars: number;
+  activeResponseChars: number;
+  toolUseCount: number;
+  lastRunId: string | null;
+  lastRunStatus: string;
+  lastRunModel: string;
+  lastRunProvider: string;
+  lastUpdatedAt: number | null;
+}
+
+function emptyOverviewTelemetry(sessionId: string | null = null): SessionOverviewTelemetry {
+  return {
+    sessionId,
+    completedRuntimeMs: 0,
+    activeRunStartedAt: null,
+    requestCount: 0,
+    completedRequests: 0,
+    runErrors: 0,
+    completedPromptChars: 0,
+    activePromptChars: 0,
+    completedResponseChars: 0,
+    activeResponseChars: 0,
+    toolUseCount: 0,
+    lastRunId: null,
+    lastRunStatus: "idle",
+    lastRunModel: "",
+    lastRunProvider: "",
+    lastUpdatedAt: null,
+  };
+}
+
+function summarizeRunsForOverview(
+  sessionId: string,
+  runs: ChatRunSummary[]
+): SessionOverviewTelemetry {
+  const latestRun = runs[0];
+  return {
+    sessionId,
+    completedRuntimeMs: runs
+      .filter((run) => run.status !== "running")
+      .reduce((total, run) => total + Math.max(0, run.duration_ms || 0), 0),
+    activeRunStartedAt: null,
+    requestCount: runs.length,
+    completedRequests: runs.filter((run) => run.status === "completed").length,
+    runErrors: runs.filter((run) => run.status === "error").length,
+    completedPromptChars: runs.reduce((total, run) => total + Math.max(0, run.prompt_chars || 0), 0),
+    activePromptChars: 0,
+    completedResponseChars: runs.reduce((total, run) => total + Math.max(0, run.response_chars || 0), 0),
+    activeResponseChars: 0,
+    toolUseCount: runs.filter((run) => run.orchestrated).length,
+    lastRunId: latestRun?.id ?? null,
+    lastRunStatus: latestRun?.status ?? "idle",
+    lastRunModel: latestRun?.model ?? "",
+    lastRunProvider: latestRun?.provider ?? "",
+    lastUpdatedAt: latestRun ? Date.parse(latestRun.created_at) : null,
+  };
+}
+
 function parseSseFrame(rawFrame: string): SseFrame | null {
   const lines = rawFrame.split("\n");
   let event = "message";
@@ -147,7 +273,7 @@ export default function Home() {
   const [workspaces, setWorkspaces] = useState<WorkspaceState[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceState | null>(null);
   const [settings, setSettings] = useState<AppSettings>({
-    theme: "light",
+    theme: "dark",
     sidebar_collapsed: false,
     default_model: "models/gemini-3.1-pro-preview",
   });
@@ -155,6 +281,11 @@ export default function Home() {
   const [searchMode, setSearchMode] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [orchestrate, setOrchestrate] = useState(false);
+  const [morphActive, setMorphActive] = useState(false);
+  const [overviewTelemetry, setOverviewTelemetry] = useState<SessionOverviewTelemetry>(() =>
+    emptyOverviewTelemetry()
+  );
+  const toggleRef = useRef<HTMLButtonElement>(null);
 
   // Model list is derived, not stored, so provider add/remove stays consistent.
   const models = useMemo(
@@ -231,6 +362,43 @@ export default function Home() {
     }
   }, []);
 
+  const fetchSessionRuns = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`${API_URL}/sessions/${id}/runs`);
+      if (!res.ok) {
+        setOverviewTelemetry((current) =>
+          current.sessionId === id ? current : emptyOverviewTelemetry(id)
+        );
+        return;
+      }
+
+      const runs: ChatRunSummary[] = await res.json();
+      setOverviewTelemetry((current) => {
+        const summarized = summarizeRunsForOverview(id, runs);
+        if (current.sessionId === id && current.activeRunStartedAt) {
+          return {
+            ...summarized,
+            activeRunStartedAt: current.activeRunStartedAt,
+            requestCount: Math.max(summarized.requestCount, current.requestCount),
+            activePromptChars: current.activePromptChars,
+            activeResponseChars: current.activeResponseChars,
+            toolUseCount: Math.max(summarized.toolUseCount, current.toolUseCount),
+            lastRunId: current.lastRunId ?? summarized.lastRunId,
+            lastRunStatus: current.lastRunStatus,
+            lastRunModel: current.lastRunModel || summarized.lastRunModel,
+            lastRunProvider: current.lastRunProvider || summarized.lastRunProvider,
+          };
+        }
+        return summarized;
+      });
+    } catch (err) {
+      console.error("Failed to fetch session runs:", err);
+      setOverviewTelemetry((current) =>
+        current.sessionId === id ? current : emptyOverviewTelemetry(id)
+      );
+    }
+  }, []);
+
   const fetchProjectDocuments = useCallback(async (projectId: string) => {
     if (!projectId) {
       setProjectDocuments([]);
@@ -250,6 +418,11 @@ export default function Home() {
     }
   }, []);
 
+  // Sync <html> element's data-theme for body-level CSS vars
+  useEffect(() => {
+    document.documentElement.dataset.theme = settings.theme;
+  }, [settings.theme]);
+
   // Fetch all sessions on mount
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -265,23 +438,29 @@ export default function Home() {
   // provider is added or removed). Preserves the choice when still available.
   useEffect(() => {
     if (models.length === 0) return;
-    setSelectedModel((current) =>
-      models.some((model) => model.id === current) ? current : models[0].id
-    );
+    const timeoutId = window.setTimeout(() => {
+      setSelectedModel((current) =>
+        models.some((model) => model.id === current) ? current : models[0].id
+      );
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
   }, [models]);
 
   // Fetch messages whenever current session changes
   useEffect(() => {
-    if (!currentSessionId) {
-      return;
-    }
-
     const timeoutId = window.setTimeout(() => {
+      if (!currentSessionId) {
+        setOverviewTelemetry(emptyOverviewTelemetry());
+        return;
+      }
+
       void fetchSessionDetails(currentSessionId);
+      void fetchSessionRuns(currentSessionId);
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
-  }, [currentSessionId, fetchSessionDetails]);
+  }, [currentSessionId, fetchSessionDetails, fetchSessionRuns]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -290,6 +469,40 @@ export default function Home() {
 
     return () => window.clearTimeout(timeoutId);
   }, [fetchProjectDocuments, selectedProjectId]);
+
+  const handleThemeChange = useCallback((newTheme: string) => {
+    const el = document.querySelector(".maistorage-app");
+    if (!el) return;
+
+    const currentTheme = el.getAttribute("data-theme") || "dark";
+    if (currentTheme === newTheme) return;
+
+    el.classList.add("theme-morph");
+    setMorphActive(true);
+
+    const rect = toggleRef.current?.getBoundingClientRect();
+    const originX = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+    const originY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+
+    const fromBg = currentTheme === "dark" ? DARK_BG : LIGHT_BG;
+
+    const container = document.createElement("div");
+    container.className = "theme-reveal-container";
+    const bg = document.createElement("div");
+    bg.className = "theme-reveal-bg";
+    bg.style.background = fromBg;
+    bg.style.transformOrigin = `${originX}px ${originY}px`;
+    container.appendChild(bg);
+    document.body.appendChild(container);
+
+    el.setAttribute("data-theme", newTheme);
+    document.documentElement.dataset.theme = newTheme;
+
+    setTimeout(() => {
+      setMorphActive(false);
+      container.remove();
+    }, 500);
+  }, [toggleRef]);
 
   const createSession = async (projectId?: string | null): Promise<Session | null> => {
     try {
@@ -349,6 +562,135 @@ export default function Home() {
     void fetchProjectDocuments(projectId);
   };
 
+  const beginOverviewRun = (
+    sessionId: string,
+    messageText: string,
+    attachments: AttachmentPayload[]
+  ) => {
+    const attachmentChars = attachments.reduce(
+      (total, attachment) => total + (attachment.content?.length ?? 0),
+      0
+    );
+    const enabledToolCount =
+      Number(searchMode) + Number(webSearch) + Number(orchestrate);
+
+    setOverviewTelemetry((current) => {
+      const base =
+        current.sessionId === sessionId ? current : emptyOverviewTelemetry(sessionId);
+      return {
+        ...base,
+        sessionId,
+        activeRunStartedAt: Date.now(),
+        requestCount: base.requestCount + 1,
+        activePromptChars: messageText.length + attachmentChars,
+        activeResponseChars: 0,
+        toolUseCount: base.toolUseCount + enabledToolCount,
+        lastRunId: null,
+        lastRunStatus: "running",
+        lastRunModel: selectedModel,
+        lastRunProvider:
+          providers.find((provider) => provider.default_model === selectedModel)?.provider ||
+          "gemini",
+        lastUpdatedAt: Date.now(),
+      };
+    });
+  };
+
+  const applyStreamMetadataToOverview = (sessionId: string, meta: StreamMetadata) => {
+    setOverviewTelemetry((current) => {
+      const base =
+        current.sessionId === sessionId ? current : emptyOverviewTelemetry(sessionId);
+      return {
+        ...base,
+        sessionId,
+        activePromptChars:
+          typeof meta.prompt_chars === "number"
+            ? Math.max(0, meta.prompt_chars)
+            : base.activePromptChars,
+        lastRunId: meta.run_id ?? base.lastRunId,
+        lastRunStatus: "running",
+        lastRunModel: meta.model ?? base.lastRunModel,
+        lastRunProvider: meta.provider ?? base.lastRunProvider,
+        lastUpdatedAt: Date.now(),
+      };
+    });
+  };
+
+  const addStreamTokenToOverview = (sessionId: string, chunk: string) => {
+    setOverviewTelemetry((current) => {
+      if (current.sessionId !== sessionId) return current;
+      return {
+        ...current,
+        activeResponseChars: current.activeResponseChars + chunk.length,
+        lastUpdatedAt: Date.now(),
+      };
+    });
+  };
+
+  const completeOverviewRun = (sessionId: string, payload?: RunEventPayload) => {
+    setOverviewTelemetry((current) => {
+      if (current.sessionId !== sessionId) return current;
+      const activeDuration =
+        current.activeRunStartedAt === null
+          ? 0
+          : Math.max(0, Date.now() - current.activeRunStartedAt);
+      const durationMs =
+        typeof payload?.duration_ms === "number"
+          ? Math.max(0, payload.duration_ms)
+          : activeDuration;
+      const status = payload?.status ?? "completed";
+      return {
+        ...current,
+        completedRuntimeMs: current.completedRuntimeMs + durationMs,
+        activeRunStartedAt: null,
+        completedRequests:
+          status === "completed"
+            ? current.completedRequests + 1
+            : current.completedRequests,
+        runErrors:
+          status === "error" ? current.runErrors + 1 : current.runErrors,
+        completedPromptChars:
+          current.completedPromptChars +
+          (typeof payload?.prompt_chars === "number"
+            ? Math.max(0, payload.prompt_chars)
+            : current.activePromptChars),
+        activePromptChars: 0,
+        completedResponseChars:
+          current.completedResponseChars +
+          (typeof payload?.response_chars === "number"
+            ? Math.max(0, payload.response_chars)
+            : current.activeResponseChars),
+        activeResponseChars: 0,
+        lastRunId: payload?.run_id ?? current.lastRunId,
+        lastRunStatus: status,
+        lastRunModel: payload?.model ?? current.lastRunModel,
+        lastRunProvider: payload?.provider ?? current.lastRunProvider,
+        lastUpdatedAt: Date.now(),
+      };
+    });
+  };
+
+  const failOverviewRun = (sessionId: string) => {
+    setOverviewTelemetry((current) => {
+      if (current.sessionId !== sessionId || current.activeRunStartedAt === null) {
+        return current;
+      }
+      return {
+        ...current,
+        completedRuntimeMs:
+          current.completedRuntimeMs + Math.max(0, Date.now() - current.activeRunStartedAt),
+        activeRunStartedAt: null,
+        completedPromptChars: current.completedPromptChars + current.activePromptChars,
+        activePromptChars: 0,
+        completedResponseChars: current.completedResponseChars + current.activeResponseChars,
+        activeResponseChars: 0,
+        runErrors: current.runErrors + 1,
+        lastRunStatus: "error",
+        lastUpdatedAt: Date.now(),
+      };
+    });
+  };
+
   const handleSendMessageWithSessionId = async (
     sessionId: string,
     messageText: string,
@@ -359,6 +701,7 @@ export default function Home() {
     // 1. Instantly append user message to local UI state
     const userMessage: Message = { role: "user", content: messageText };
     setMessages((prev) => [...prev, userMessage]);
+    beginOverviewRun(sessionId, messageText, attachments);
     setIsStreaming(true);
 
     try {
@@ -394,6 +737,7 @@ export default function Home() {
       const decoder = new TextDecoder();
       let buffer = "";
       let hasInitializedAssistantBubble = false;
+      let hasReceivedRunSummary = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -411,7 +755,7 @@ export default function Home() {
 
           if (frame.event === "metadata") {
               try {
-                const meta: { session_title?: string } = JSON.parse(frame.data);
+                const meta: StreamMetadata = JSON.parse(frame.data);
                 const sessionTitle = meta.session_title;
                 if (sessionTitle) {
                   setSessions((prev) =>
@@ -420,13 +764,30 @@ export default function Home() {
                     )
                   );
                 }
+                applyStreamMetadataToOverview(sessionId, meta);
               } catch (e) {
                 console.error("Failed to parse metadata", e);
               }
               continue;
           }
 
+          if (frame.event === "run") {
+            try {
+              completeOverviewRun(sessionId, JSON.parse(frame.data));
+              hasReceivedRunSummary = true;
+            } catch (e) {
+              console.error("Failed to parse run summary", e);
+              completeOverviewRun(sessionId);
+              hasReceivedRunSummary = true;
+            }
+            continue;
+          }
+
           if (frame.event === "end" || frame.data === "[DONE]") {
+            if (!hasReceivedRunSummary) {
+              completeOverviewRun(sessionId);
+              hasReceivedRunSummary = true;
+            }
             continue;
           }
 
@@ -434,6 +795,7 @@ export default function Home() {
             throw new Error(frame.data);
           }
 
+          addStreamTokenToOverview(sessionId, frame.data);
           if (!hasInitializedAssistantBubble) {
             setMessages((prev) => [
               ...prev,
@@ -457,6 +819,7 @@ export default function Home() {
       }
     } catch (err) {
       console.error("Streaming error:", err);
+      failOverviewRun(sessionId);
       // Append error message
       setMessages((prev) => [
         ...prev,
@@ -469,6 +832,7 @@ export default function Home() {
       setIsStreaming(false);
       // Re-fetch sessions to make sure session titles are fully synced
       await fetchSessions();
+      await fetchSessionRuns(sessionId);
     }
   };
 
@@ -546,6 +910,10 @@ export default function Home() {
   };
 
   const saveSettings = async (payload: Partial<AppSettings>) => {
+    if (payload.theme) {
+      handleThemeChange(payload.theme);
+    }
+    setSettings((current) => ({ ...current, ...payload }));
     const res = await fetch(`${API_URL}/settings`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -585,76 +953,90 @@ export default function Home() {
     : [];
 
   return (
-    <div className="flex h-[100dvh] w-full overflow-hidden bg-slate-50 text-slate-950 max-md:flex-col">
-      {/* Sidebar - Sessions list & controls */}
-      <SessionSidebar
-        sessions={sessions}
-        currentSessionId={currentSessionId}
-        onSelectSession={handleSelectSession}
-        onCreateSession={handleCreateSession}
-        onDeleteSession={handleDeleteSession}
-        selectedAgentId={selectedAgentId}
-        onSelectAgent={setSelectedAgentId}
-        agents={agents}
-        projects={projects}
-        selectedProjectId={selectedProjectId}
-        collapsed={settings.sidebar_collapsed}
-        onToggleCollapsed={handleSidebarCollapse}
-        onSelectProject={handleSelectProject}
-        onOpenAgents={() => setModalMode("agent")}
-        onOpenProject={() => setModalMode("project")}
-        onOpenSettings={() => setModalMode("settings")}
-      />
+    <MotionConfig transition={spring.soft}>
+      <div
+        data-theme={settings.theme === "dark" ? "dark" : "light"}
+        className={`maistorage-app relative flex h-[100dvh] w-full overflow-hidden text-[var(--app-text)] max-md:flex-col${morphActive ? " theme-morph" : ""}`}
+      >
+        <MaistorageFieldScene />
+        <SmoothScroll />
+        <AppMotion />
 
-      {activeProject && !currentSessionId ? (
-        <ProjectWorkspace
-          project={activeProject}
-          documents={projectDocuments}
-          sessions={activeProjectSessions}
-          onUploadDocument={saveProjectDocument}
-          onStartChat={handleStartProjectChat}
-          onOpenSession={handleSelectSession}
-        />
-      ) : (
-        <ChatWindow
-          sessionId={currentSessionId}
-          messages={messages}
-          onSendMessage={handleSendMessage}
-          isStreaming={isStreaming}
+        <SessionSidebar
+          toggleRef={toggleRef}
+          sessions={sessions}
+          currentSessionId={currentSessionId}
+          onSelectSession={handleSelectSession}
+          onCreateSession={handleCreateSession}
+          onDeleteSession={handleDeleteSession}
           selectedAgentId={selectedAgentId}
-          models={models}
-          selectedModel={selectedModel}
-          onSelectModel={setSelectedModel}
-          activeWorkspace={activeWorkspace}
-          onWorkspaceSelected={saveWorkspace}
+          onSelectAgent={setSelectedAgentId}
+          agents={agents}
           projects={projects}
           selectedProjectId={selectedProjectId}
-          projectDocuments={projectDocuments}
-          onSaveProjectDocument={saveProjectDocument}
-          searchMode={searchMode}
-          webSearch={webSearch}
-          orchestrate={orchestrate}
-          onToggleSearchMode={() => setSearchMode((enabled) => !enabled)}
-          onToggleWebSearch={() => setWebSearch((enabled) => !enabled)}
-          onToggleOrchestrate={() => setOrchestrate((enabled) => !enabled)}
+          collapsed={settings.sidebar_collapsed}
+          theme={settings.theme}
+          onToggleCollapsed={handleSidebarCollapse}
+          onToggleTheme={() =>
+            void saveSettings({ theme: settings.theme === "dark" ? "light" : "dark" })
+          }
+          onSelectProject={handleSelectProject}
+          onOpenAgents={() => setModalMode("agent")}
+          onOpenProject={() => setModalMode("project")}
+          onOpenSettings={() => setModalMode("settings")}
         />
-      )}
 
-      <WorkspaceModals
-        mode={modalMode}
-        onClose={() => setModalMode(null)}
-        providers={providers}
-        agents={agents}
-        projects={projects}
-        models={models}
-        settings={settings}
-        workspaces={workspaces}
-        onSaveProvider={saveProvider}
-        onDeleteProvider={deleteProvider}
-        onSaveAgent={saveAgent}
-        onSaveProject={saveProject}
-        onSaveSettings={saveSettings}
-      />
-    </div>
+        {activeProject && !currentSessionId ? (
+          <ProjectWorkspace
+            project={activeProject}
+            documents={projectDocuments}
+            sessions={activeProjectSessions}
+            onUploadDocument={saveProjectDocument}
+            onStartChat={handleStartProjectChat}
+            onOpenSession={handleSelectSession}
+          />
+        ) : (
+          <ChatWindow
+            sessionId={currentSessionId}
+            messages={messages}
+            onSendMessage={handleSendMessage}
+            isStreaming={isStreaming}
+            selectedAgentId={selectedAgentId}
+            models={models}
+            selectedModel={selectedModel}
+            onSelectModel={setSelectedModel}
+            activeWorkspace={activeWorkspace}
+            onWorkspaceSelected={saveWorkspace}
+            projects={projects}
+            selectedProjectId={selectedProjectId}
+            projectDocuments={projectDocuments}
+            onSaveProjectDocument={saveProjectDocument}
+            overviewTelemetry={overviewTelemetry}
+            searchMode={searchMode}
+            webSearch={webSearch}
+            orchestrate={orchestrate}
+            onToggleSearchMode={() => setSearchMode((enabled) => !enabled)}
+            onToggleWebSearch={() => setWebSearch((enabled) => !enabled)}
+            onToggleOrchestrate={() => setOrchestrate((enabled) => !enabled)}
+          />
+        )}
+
+        <WorkspaceModals
+          mode={modalMode}
+          onClose={() => setModalMode(null)}
+          providers={providers}
+          agents={agents}
+          projects={projects}
+          models={models}
+          settings={settings}
+          workspaces={workspaces}
+          onSaveProvider={saveProvider}
+          onDeleteProvider={deleteProvider}
+          onSaveAgent={saveAgent}
+          onSaveProject={saveProject}
+          onSaveSettings={saveSettings}
+        />
+      </div>
+    </MotionConfig>
   );
 }

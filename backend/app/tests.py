@@ -224,6 +224,7 @@ def test_streaming_endpoint_and_db_persistence():
         assert len(tokens) > 0
         
         # Verify end event
+        assert any("event: run" in line for line in lines)
         assert any("event: end" in line for line in lines)
         assert any("[DONE]" in line for line in lines)
 

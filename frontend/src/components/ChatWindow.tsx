@@ -3,7 +3,9 @@
 import Image from "next/image";
 import { Activity, ArrowDown, Bot, BrainCircuit, ChevronDown, Clock, Code2, CreditCard, FileCode2, FileText, FolderOpen, Gauge, Globe, Mic, Paperclip, Plus, Save, Search, Send, Terminal, UploadCloud, User, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { AttachmentPayload, ModelOption, Project, ProjectDocument, WorkspaceState } from "@/app/page";
+import { AnimatePresence, motion } from "motion/react";
+import { listItemVariants, MotionButton, spring } from "@/components/MotionControls";
+import type { AttachmentPayload, ModelOption, Project, ProjectDocument, SessionOverviewTelemetry, WorkspaceState } from "@/app/page";
 
 interface Message {
   role: string;
@@ -25,6 +27,7 @@ interface ChatWindowProps {
   selectedProjectId: string;
   projectDocuments: ProjectDocument[];
   onSaveProjectDocument: (projectId: string, document: AttachmentPayload) => Promise<void>;
+  overviewTelemetry: SessionOverviewTelemetry;
   searchMode: boolean;
   webSearch: boolean;
   orchestrate: boolean;
@@ -96,7 +99,7 @@ function formatInteger(value: number) {
 }
 
 function formatCompact(value: number) {
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat("en-US", {
     maximumFractionDigits: value >= 10_000 ? 1 : 0,
     notation: "compact",
   }).format(value);
@@ -192,6 +195,7 @@ export default function ChatWindow({
   selectedProjectId,
   projectDocuments,
   onSaveProjectDocument,
+  overviewTelemetry,
   searchMode,
   webSearch,
   orchestrate,
@@ -204,6 +208,7 @@ export default function ChatWindow({
   const [isListening, setIsListening] = useState(false);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const footerRef = useRef<HTMLElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const projectDocInputRef = useRef<HTMLInputElement>(null);
@@ -215,23 +220,47 @@ export default function ChatWindow({
   const [terminalLines, setTerminalLines] = useState<string[]>([
     "[workspace] No folder selected yet.",
   ]);
-  const [sessionStartedAt, setSessionStartedAt] = useState(() => Date.now());
   const [now, setNow] = useState(() => Date.now());
+  const [footerHeight, setFooterHeight] = useState(180);
+  const composerPlaceholder =
+    isStreaming
+      ? "Waiting for response..."
+      : sessionId || messages.length > 0
+        ? "Reply to the MaiStorage workspace..."
+        : "How can I help you today?";
 
   const activeFileContent =
     activeWorkspace?.selected_files.find((file) => file.name === activeFilePath)?.content ?? "";
-
-  useEffect(() => {
-    setSessionStartedAt(Date.now());
-  }, [sessionId]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(intervalId);
   }, []);
 
+  useEffect(() => {
+    const footer = footerRef.current;
+    if (!footer) return;
+
+    const updateFooterHeight = () => {
+      setFooterHeight(Math.ceil(footer.getBoundingClientRect().height));
+    };
+
+    updateFooterHeight();
+    const resizeObserver = new ResizeObserver(updateFooterHeight);
+    resizeObserver.observe(footer);
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+  }, [input]);
+
   const overviewStats = useMemo(() => {
-    const promptChars =
+    const visiblePromptChars =
       messages
         .filter((message) => message.role === "user")
         .reduce((total, message) => total + message.content.length, 0) + input.length;
@@ -246,29 +275,55 @@ export default function ChatWindow({
       .join("\n");
     const assistantTokens = estimateTokens(assistantContent);
     const reasoningTokens = estimateTokens(reasoningText(assistantContent));
-    const promptTokens = estimateTokensFromChars(promptChars);
-    const otherTokens =
+    const telemetryPromptChars =
+      overviewTelemetry.completedPromptChars + overviewTelemetry.activePromptChars;
+    const telemetryResponseChars =
+      overviewTelemetry.completedResponseChars + overviewTelemetry.activeResponseChars;
+    const visiblePromptTokens = estimateTokensFromChars(visiblePromptChars);
+    const telemetryPromptTokens = estimateTokensFromChars(telemetryPromptChars);
+    const promptTokens = visiblePromptTokens;
+    const estimatedOtherTokens =
       estimateTokensFromChars(fileContextChars) +
       (searchMode ? 64 : 0) +
       (webSearch ? 64 : 0) +
       (orchestrate ? 128 : 0);
-    const completionTokens = Math.max(0, assistantTokens - reasoningTokens);
+    const otherTokens = Math.max(
+      estimatedOtherTokens,
+      telemetryPromptTokens - visiblePromptTokens
+    );
+    const responseTokens = Math.max(
+      assistantTokens,
+      estimateTokensFromChars(telemetryResponseChars)
+    );
+    const completionTokens = Math.max(0, responseTokens - reasoningTokens);
     const totalTokens = promptTokens + completionTokens + reasoningTokens + otherTokens;
     const contextPercent = Math.min(
       100,
       Math.round((totalTokens / CONTEXT_LIMIT_TOKENS) * 100)
     );
-    const requestCount = messages.filter((message) => message.role === "user").length;
+    const requestCount = Math.max(
+      overviewTelemetry.requestCount,
+      messages.filter((message) => message.role === "user").length
+    );
     const activeFlags = [searchMode, webSearch, orchestrate].filter(Boolean).length;
+    const activeRuntimeMs =
+      overviewTelemetry.completedRuntimeMs +
+      (overviewTelemetry.activeRunStartedAt
+        ? Math.max(0, now - overviewTelemetry.activeRunStartedAt)
+        : 0);
 
     return {
       activeFlags,
+      activeRuntimeMs,
       completionTokens,
       contextPercent,
+      contextRemainingPercent: Math.max(0, 100 - contextPercent),
       fileContextTokens: otherTokens,
       promptTokens,
       reasoningTokens,
       requestCount,
+      runErrors: overviewTelemetry.runErrors,
+      toolUseCount: overviewTelemetry.toolUseCount,
       totalTokens,
     };
   }, [
@@ -277,10 +332,20 @@ export default function ChatWindow({
     input,
     messages,
     orchestrate,
+    overviewTelemetry.activePromptChars,
+    overviewTelemetry.activeResponseChars,
+    overviewTelemetry.activeRunStartedAt,
+    overviewTelemetry.completedPromptChars,
+    overviewTelemetry.completedResponseChars,
+    overviewTelemetry.completedRuntimeMs,
+    overviewTelemetry.requestCount,
+    overviewTelemetry.runErrors,
+    overviewTelemetry.toolUseCount,
     projectDocuments,
     searchMode,
     selectedProjectId,
     webSearch,
+    now,
   ]);
 
   useEffect(() => {
@@ -533,60 +598,75 @@ export default function ChatWindow({
   }
 
   return (
-    <main className="relative flex min-w-0 flex-1 flex-col bg-white">
+    <main className="relative z-10 flex min-w-0 flex-1 flex-col">
 
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
         className={`flex-1 overflow-y-auto ${activeWorkspace ? "mr-[44%] border-r border-slate-200" : "xl:mr-80"}`}
+        style={{ paddingBottom: footerHeight + 20 }}
       >
         {!sessionId ? (
-          <section className="mx-auto flex min-h-full w-full max-w-[760px] flex-col items-center justify-center px-6 pb-40 pt-12">
-            <div className="relative mb-3 h-9 w-9 self-start">
+          <section className="mx-auto flex min-h-full w-full max-w-[720px] flex-col items-start justify-center px-6 py-12 max-md:min-h-0 max-md:justify-start max-md:py-8" data-reveal>
+            <div className="brand-logo-surface relative mb-5 h-[52px] w-[320px] max-w-full overflow-hidden">
               <Image
                 src="/logo.png"
-                alt="Tesseracq Labs"
+                alt="MaiStorage"
                 fill
                 priority
-                sizes="36px"
-                className="object-contain"
+                sizes="320px"
+                className="object-contain object-left"
               />
             </div>
-            <h1 className="w-full text-left text-3xl font-semibold tracking-tight text-slate-950 max-md:text-2xl">
-              How can I help you today?
+            <h1 className="heading-font w-full text-left text-[42px] font-semibold leading-[1.04] tracking-normal text-slate-950 max-md:text-[28px]">
+              Ask the MaiStorage workspace <span className="gradient-word">anything.</span>
             </h1>
+            <p className="mt-3 w-full text-left text-sm leading-6 text-slate-500">
+              Stream answers, bind project sources, and switch providers with your own API key - all inside one glass engineering console.
+            </p>
           </section>
         ) : messages.length === 0 ? (
-          <section className="mx-auto flex min-h-full w-full max-w-[760px] flex-col items-center justify-center px-6 pb-40 pt-12">
-            <div className="relative mb-3 h-9 w-9 self-start">
+          <section className="mx-auto flex min-h-full w-full max-w-[720px] flex-col items-start justify-center px-6 py-12 max-md:min-h-0 max-md:justify-start max-md:py-8" data-reveal>
+            <div className="brand-logo-surface relative mb-5 h-[52px] w-[320px] max-w-full overflow-hidden">
               <Image
                 src="/logo.png"
-                alt="Tesseracq Labs"
+                alt="MaiStorage"
                 fill
                 priority
-                sizes="36px"
-                className="object-contain"
+                sizes="320px"
+                className="object-contain object-left"
               />
             </div>
-            <h1 className="w-full text-left text-3xl font-semibold tracking-tight text-slate-950 max-md:text-2xl">
-              How can I help you today?
+            <h1 className="heading-font w-full text-left text-[42px] font-semibold leading-[1.04] tracking-normal text-slate-950 max-md:text-[28px]">
+              Ask the MaiStorage workspace <span className="gradient-word">anything.</span>
             </h1>
+            <p className="mt-3 w-full text-left text-sm leading-6 text-slate-500">
+              This chat keeps DB-backed memory and can retrieve project sources when a project is active.
+            </p>
           </section>
         ) : (
-          <div className="mx-auto w-full max-w-[760px] px-6 py-8 pb-36 max-md:px-4">
+          <motion.div layout className="mx-auto w-full max-w-[820px] px-6 py-8 max-md:px-4">
+            <AnimatePresence initial={false} mode="popLayout">
             {messages.map((message, index) => {
               const isUser = message.role === "user";
 
               return (
-                <article
+                <motion.article
                   key={`${message.role}-${index}`}
-                  className="grid grid-cols-[32px_1fr] gap-4 py-6"
+                  layout
+                  variants={listItemVariants}
+                  initial="hidden"
+                  animate="visible"
+                  exit="exit"
+                  transition={spring.soft}
+                  className="grid grid-cols-[32px_1fr] gap-4 py-5"
+                  data-reveal
                 >
                   <div
                     className={`flex h-8 w-8 items-center justify-center rounded-full ${
                       isUser
                         ? "bg-slate-900 text-white"
-                        : "border border-slate-200 bg-white text-slate-700"
+                        : "border border-[var(--glass-brd)] bg-[var(--elev)] text-slate-700"
                     }`}
                   >
                     {isUser ? (
@@ -595,50 +675,62 @@ export default function ChatWindow({
                       <Bot className="h-4 w-4" />
                     )}
                   </div>
-                  <div>
-                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">
-                      {isUser ? "You" : "Tesseracq Labs"}
+                  <div className="min-w-0 border-b border-[var(--divider)] pb-5">
+                    <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+                      {isUser ? "You" : "MaiStorage"}
                     </p>
-                    <div className="text-[15px] text-slate-800">
+                    <div className="max-w-none text-[16px] font-medium leading-8 text-slate-800 [text-shadow:0_1px_18px_rgba(0,0,0,0.22)]">
                       {isUser ? renderAgenticContent(message.content) : renderAgenticContent(message.content)}
                     </div>
                   </div>
-                </article>
+                </motion.article>
               );
             })}
 
             {isStreaming && messages[messages.length - 1]?.role === "user" && (
-              <article className="grid grid-cols-[32px_1fr] gap-4 py-6">
-                <div className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700">
+              <motion.article
+                key="streaming-response"
+                layout
+                variants={listItemVariants}
+                initial="hidden"
+                animate="visible"
+                exit="exit"
+                transition={spring.soft}
+                className="grid grid-cols-[32px_1fr] gap-4 py-6"
+              >
+                <div className="glass-card flex h-8 w-8 items-center justify-center rounded-full text-slate-700">
                   <Bot className="h-4 w-4" />
                 </div>
-                <div className="flex items-center gap-2 text-sm text-slate-500">
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-slate-400" />
+                <div className="glass-card flex w-fit items-center gap-2 rounded-xl px-3 py-2 text-sm text-slate-500">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-[var(--orange)] shadow-[0_0_14px_var(--orange-glow)]" />
                   Streaming response...
                 </div>
-              </article>
+              </motion.article>
             )}
+            </AnimatePresence>
             <div ref={messagesEndRef} />
-          </div>
+          </motion.div>
         )}
       </div>
 
       {showScrollButton && (
-        <button
+        <MotionButton
           type="button"
+          interaction="icon"
           onClick={() =>
             messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
           }
-          className="absolute bottom-28 right-8 flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50"
+          className="glass-card absolute bottom-28 right-8 flex h-9 w-9 items-center justify-center rounded-full text-slate-600 transition"
+          style={{ bottom: footerHeight + 16 }}
           aria-label="Scroll to latest message"
         >
           <ArrowDown className="h-4 w-4" />
-        </button>
+        </MotionButton>
       )}
 
       {activeWorkspace && (
-        <aside className="absolute bottom-0 right-0 top-0 flex w-[44%] flex-col bg-slate-50">
-          <div className="flex h-12 items-center justify-between border-b border-slate-200 bg-white px-4">
+        <aside className="glass-panel-strong absolute bottom-3 right-3 top-3 flex w-[44%] flex-col overflow-hidden rounded-2xl">
+          <div className="flex h-12 items-center justify-between border-b border-slate-200 px-4">
             <div className="flex min-w-0 items-center gap-2">
               <FolderOpen className="h-4 w-4 shrink-0 text-slate-600" />
               <div className="min-w-0">
@@ -646,7 +738,7 @@ export default function ChatWindow({
                 <p className="text-xs text-slate-500">{activeWorkspace.file_tree.length} indexed entries</p>
               </div>
             </div>
-            <button
+            <MotionButton
               type="button"
               onClick={() => void saveActiveFile()}
               className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
@@ -654,16 +746,23 @@ export default function ChatWindow({
             >
               <Save className="h-4 w-4" />
               Save
-            </button>
+            </MotionButton>
           </div>
 
           <div className="grid min-h-0 flex-1 grid-cols-[220px_1fr]">
-            <div className="min-h-0 overflow-y-auto border-r border-slate-200 bg-white p-3">
+            <div className="min-h-0 overflow-y-auto border-r border-slate-200 p-3">
               <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Files</p>
-              <div className="space-y-1">
+              <motion.div layout className="space-y-1">
+                <AnimatePresence initial={false} mode="popLayout">
                 {activeWorkspace.file_tree.map((item) => (
-                  <button
+                  <MotionButton
                     key={item.path}
+                    layout
+                    variants={listItemVariants}
+                    initial="hidden"
+                    animate="visible"
+                    exit="exit"
+                    transition={spring.soft}
                     type="button"
                     onClick={() => item.type === "file" && setActiveFilePath(item.path)}
                     className={`flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition ${
@@ -681,14 +780,15 @@ export default function ChatWindow({
                       <FileCode2 className="h-3.5 w-3.5 shrink-0" />
                     )}
                     <span className="truncate">{item.path.replace(`${activeWorkspace.name}/`, "")}</span>
-                  </button>
+                  </MotionButton>
                 ))}
-              </div>
+                </AnimatePresence>
+              </motion.div>
             </div>
 
             <div className="flex min-h-0 flex-col">
               <div className="flex min-h-0 flex-1 flex-col">
-                <div className="flex h-10 items-center justify-between border-b border-slate-200 bg-white px-3">
+                <div className="flex h-10 items-center justify-between border-b border-slate-200 px-3">
                   <p className="truncate text-xs font-semibold text-slate-700">
                     {activeFilePath || "No file selected"}
                   </p>
@@ -705,7 +805,7 @@ export default function ChatWindow({
                 />
               </div>
 
-              <div className="h-44 border-t border-slate-200 bg-white">
+              <div className="h-44 border-t border-slate-200">
                 <div className="flex h-9 items-center gap-2 border-b border-slate-200 px-3">
                   <Terminal className="h-4 w-4 text-slate-600" />
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Terminal / Index Log</p>
@@ -715,7 +815,7 @@ export default function ChatWindow({
                 </pre>
               </div>
 
-              <div className="border-t border-slate-200 bg-white p-3">
+              <div className="border-t border-slate-200 p-3">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Project Knowledge</p>
@@ -723,7 +823,7 @@ export default function ChatWindow({
                       {projectDocuments.length} scoped document{projectDocuments.length === 1 ? "" : "s"}
                     </p>
                   </div>
-                  <button
+                  <MotionButton
                     type="button"
                     disabled={!selectedProjectId}
                     onClick={() => projectDocInputRef.current?.click()}
@@ -732,7 +832,7 @@ export default function ChatWindow({
                   >
                     <UploadCloud className="h-4 w-4" />
                     Upload
-                  </button>
+                  </MotionButton>
                 </div>
                 <div className="max-h-20 space-y-1 overflow-auto">
                   {projectDocuments.length === 0 ? (
@@ -757,16 +857,22 @@ export default function ChatWindow({
         <UsageOverviewPanel
           stats={overviewStats}
           selectedModel={selectedModel}
-          sessionDuration={formatDuration(now - sessionStartedAt)}
-          streamingDuration={isStreaming ? formatDuration(now - sessionStartedAt) : "-"}
+          selectedProvider={overviewTelemetry.lastRunProvider}
+          runStatus={overviewTelemetry.lastRunStatus}
+          sessionDuration={formatDuration(overviewStats.activeRuntimeMs)}
+          streamingDuration={
+            overviewTelemetry.activeRunStartedAt
+              ? formatDuration(now - overviewTelemetry.activeRunStartedAt)
+              : "-"
+          }
           isStreaming={isStreaming}
         />
       )}
 
-      <footer className={`absolute bottom-0 left-0 ${activeWorkspace ? "right-[44%]" : "right-0 xl:right-80"} bg-gradient-to-t from-white via-white to-white/0 px-6 pb-5 pt-10 max-md:px-4`}>
+      <footer ref={footerRef} className={`composer-fade pointer-events-none absolute bottom-0 left-0 ${activeWorkspace ? "right-[44%]" : "right-0 xl:right-80"} px-6 pb-5 pt-10 max-md:px-4`}>
         <form
           onSubmit={handleSubmit}
-          className={`shadow-box mx-auto rounded-2xl border border-slate-200 bg-white p-2 ${activeWorkspace ? "max-w-[calc(100%-48px)]" : "max-w-[760px]"}`}
+          className={`glass-composer pointer-events-auto mx-auto rounded-[22px] p-2 shadow-[var(--glass-sh),var(--glass-hi)] ${activeWorkspace ? "max-w-[calc(100%-48px)]" : "max-w-[760px]"}`}
         >
           <input
             ref={fileInputRef}
@@ -793,7 +899,7 @@ export default function ChatWindow({
             onChange={(event) => void handleProjectDocumentSelection(event.target.files)}
           />
           {(attachments.length > 0 || activeWorkspace || searchMode || webSearch || orchestrate || selectedModel) && (
-            <div className="mb-1 flex flex-wrap items-center gap-1.5 px-2 pt-1">
+            <div className="mb-1 flex flex-wrap items-center gap-1.5 px-2 pt-1 max-md:hidden">
               <StatusChip label={`Agent: ${AGENT_LABELS[selectedAgentId] ?? "General"}`} />
               <StatusChip label={`Model: ${selectedModel}`} />
               {selectedProjectId && (
@@ -810,23 +916,31 @@ export default function ChatWindow({
               {searchMode && <StatusChip label="Search mode" />}
               {webSearch && <StatusChip label="Web lookup" />}
               {orchestrate && <StatusChip label="Multi-agent orchestration" />}
+              <AnimatePresence initial={false} mode="popLayout">
               {attachments.map((attachment, index) => (
-                <button
+                <MotionButton
                   key={`${attachment.name}-${index}`}
+                  layout
+                  variants={listItemVariants}
+                  initial="hidden"
+                  animate="visible"
+                  exit="exit"
+                  transition={spring.soft}
                   type="button"
                   onClick={() =>
                     setAttachments((current) =>
                       current.filter((_, itemIndex) => itemIndex !== index)
                     )
                   }
-                  className="flex max-w-48 items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700 transition hover:border-red-200 hover:bg-red-50 hover:text-red-700"
+                  className="field-surface flex max-w-48 items-center gap-1 rounded-lg px-2 py-1 text-xs text-slate-700 transition hover:border-red-200 hover:text-red-700"
                   title={`Remove ${attachment.name}`}
                 >
                   <FileText className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{attachment.name}</span>
                   <X className="h-3.5 w-3.5 shrink-0" />
-                </button>
+                </MotionButton>
               ))}
+              </AnimatePresence>
             </div>
           )}
           <textarea
@@ -841,19 +955,15 @@ export default function ChatWindow({
               }}
               disabled={isStreaming}
               rows={1}
-              placeholder={
-                isStreaming
-                  ? "Waiting for response..."
-                  : "How can I help you today?"
-              }
-              className="block max-h-32 min-h-11 w-full resize-none bg-transparent px-3 py-3 text-[15px] text-slate-900 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
+              placeholder={composerPlaceholder}
+              className="block max-h-40 min-h-11 w-full resize-none overflow-y-auto bg-transparent px-3 py-3 text-[15px] text-slate-900 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:text-slate-400"
             />
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1">
+          <div className="flex items-center justify-between gap-2 max-md:flex-col max-md:items-stretch">
+            <div className="flex min-w-0 flex-wrap items-center gap-1">
               {selectedProjectId && (
                 <>
                   <div
-                    className="flex h-8 max-w-44 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 text-sm text-slate-700"
+                    className="glass-card flex h-8 max-w-44 items-center gap-1.5 rounded-lg px-2 text-sm text-slate-700"
                     title="Active project"
                   >
                     <FileText className="h-4 w-4 shrink-0" />
@@ -861,16 +971,16 @@ export default function ChatWindow({
                       {projects.find((project) => project.id === selectedProjectId)?.name ?? "Project"}
                     </span>
                   </div>
-                  <button
+                  <MotionButton
                     type="button"
                     disabled={isStreaming}
                     onClick={() => projectDocInputRef.current?.click()}
-                    className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-700 transition hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+                    className="field-surface flex h-8 items-center gap-1.5 rounded-lg px-2 text-sm text-slate-700 transition hover:bg-white/10 hover:text-slate-900 disabled:cursor-not-allowed disabled:text-slate-400"
                     title="Upload project source"
                   >
                     <UploadCloud className="h-4 w-4" />
                     <span className="max-md:hidden">Sources</span>
-                  </button>
+                  </MotionButton>
                 </>
               )}
               <ModelSelect
@@ -914,21 +1024,22 @@ export default function ChatWindow({
                 onClick={onToggleOrchestrate}
               />
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center justify-end gap-1">
               <IconButton
                 icon={<Mic className="h-4 w-4" />}
                 label={isListening ? "Listening" : "Voice"}
                 active={isListening}
                 onClick={startVoiceInput}
               />
-              <button
+              <MotionButton
                 type="submit"
+                interaction="icon"
                 disabled={isStreaming || (!input.trim() && attachments.length === 0)}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-900 text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                className="primary-command flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label="Send message"
               >
                 <Send className="h-4 w-4" />
-              </button>
+              </MotionButton>
             </div>
           </div>
         </form>
@@ -939,24 +1050,32 @@ export default function ChatWindow({
 
 interface UsageOverviewStats {
   activeFlags: number;
+  activeRuntimeMs: number;
   completionTokens: number;
   contextPercent: number;
+  contextRemainingPercent: number;
   fileContextTokens: number;
   promptTokens: number;
   reasoningTokens: number;
   requestCount: number;
+  runErrors: number;
+  toolUseCount: number;
   totalTokens: number;
 }
 
 function UsageOverviewPanel({
   stats,
   selectedModel,
+  selectedProvider,
+  runStatus,
   sessionDuration,
   streamingDuration,
   isStreaming,
 }: {
   stats: UsageOverviewStats;
   selectedModel: string;
+  selectedProvider: string;
+  runStatus: string;
   sessionDuration: string;
   streamingDuration: string;
   isStreaming: boolean;
@@ -967,23 +1086,41 @@ function UsageOverviewPanel({
       : stats.contextPercent >= 65
         ? "Many files"
         : "Healthy";
-  const ringBackground = `conic-gradient(rgb(15 23 42) ${stats.contextPercent}%, rgb(226 232 240) 0)`;
+  const ringBackground = `conic-gradient(var(--orange) ${stats.contextPercent}%, var(--stroke-track) 0)`;
+  const statusLabel =
+    runStatus === "running"
+      ? "Streaming"
+      : runStatus === "completed"
+        ? "Complete"
+        : runStatus === "error"
+          ? "Error"
+          : runStatus === "cancelled"
+            ? "Cancelled"
+            : "Idle";
+  const requestDetail =
+    stats.runErrors > 0 ? `${stats.runErrors} error${stats.runErrors === 1 ? "" : "s"}` : "submitted";
+  const toolDetail =
+    stats.toolUseCount > 0
+      ? "used in requests"
+      : stats.activeFlags > 0
+        ? "enabled now"
+        : "none";
 
   return (
-    <aside className="absolute bottom-0 right-0 top-0 hidden w-80 flex-col border-l border-slate-200 bg-white xl:flex">
+    <aside className="glass-panel-strong absolute bottom-3 right-3 top-3 hidden w-80 flex-col overflow-hidden rounded-[22px] xl:flex">
       <div className="flex h-14 items-center gap-2 border-b border-slate-200 px-4">
         <Activity className="h-4 w-4 text-slate-700" />
-        <p className="text-sm font-semibold text-slate-950">Overview</p>
+        <p className="heading-font text-sm font-semibold text-slate-950">Overview</p>
       </div>
 
-      <div className="flex-1 space-y-3 overflow-auto bg-slate-50 p-3">
+      <div className="flex-1 space-y-3 overflow-auto p-3">
         <OverviewSection icon={<Gauge className="h-4 w-4" />} title="Context window">
           <div className="flex flex-col items-center gap-3">
             <div
               className="flex h-36 w-36 items-center justify-center rounded-full p-4"
               style={{ background: ringBackground }}
             >
-              <div className="flex h-full w-full flex-col items-center justify-center rounded-full bg-white">
+              <div className="field-surface flex h-full w-full flex-col items-center justify-center rounded-full">
                 <p className="text-3xl font-semibold text-slate-950">{stats.contextPercent}%</p>
                 <p className="text-xs text-slate-500">context used</p>
               </div>
@@ -1003,29 +1140,31 @@ function UsageOverviewPanel({
 
         <OverviewSection icon={<Clock className="h-4 w-4" />} title="Runtime">
           <div className="grid grid-cols-2 gap-2">
-            <StatTile label="Time" value={sessionDuration} />
+            <StatTile label="Time" value={sessionDuration} detail="active only" />
             <StatTile label="Streaming" value={streamingDuration} detail={isStreaming ? "active" : "idle"} />
-            <StatTile label="Requests" value={formatInteger(stats.requestCount)} />
-            <StatTile label="Tools" value={formatInteger(stats.activeFlags)} detail="enabled" />
+            <StatTile label="Requests" value={formatInteger(stats.requestCount)} detail={requestDetail} />
+            <StatTile label="Tools" value={formatInteger(Math.max(stats.toolUseCount, stats.activeFlags))} detail={toolDetail} />
           </div>
         </OverviewSection>
 
         <OverviewSection icon={<CreditCard className="h-4 w-4" />} title="Cost">
           <div className="grid grid-cols-2 gap-2">
-            <StatTile label="Session cost" value="-" detail="usage API needed" />
-            <StatTile label="Cache hit" value="-" detail="not exposed" />
+            <StatTile label="Estimated tokens" value={formatCompact(stats.totalTokens)} detail="char based" />
+            <StatTile label="Cache hit" value="-" detail="provider only" />
           </div>
-          <p className="mt-3 rounded-lg border border-slate-200 bg-white p-3 text-xs leading-5 text-slate-500">
-            Token counts update live here. Exact billed cost needs backend usage metadata from the provider stream.
+          <p className="field-surface mt-3 rounded-lg p-3 text-xs leading-5 text-slate-500">
+            Runtime and request counts come from stream runs. Exact billed cost still needs provider usage metadata.
           </p>
         </OverviewSection>
 
         <OverviewSection icon={<Terminal className="h-4 w-4" />} title="Session status">
           <div className="grid grid-cols-2 gap-2">
             <StatTile label="Context health" value={contextHealth} />
-            <StatTile label="Compaction" value={`${Math.max(0, 100 - stats.contextPercent)}%`} />
+            <StatTile label="Compaction" value={`${stats.contextRemainingPercent}%`} detail="room left" />
+            <StatTile label="Run status" value={statusLabel} />
+            <StatTile label="Provider" value={selectedProvider || "gemini"} />
           </div>
-          <p className="mt-2 truncate rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-500">
+          <p className="field-surface mt-2 truncate rounded-lg p-3 text-xs text-slate-500">
             {selectedModel || "No model selected"}
           </p>
         </OverviewSection>
@@ -1044,7 +1183,7 @@ function OverviewSection({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+    <section className="glass-card rounded-xl p-3">
       <div className="mb-3 flex items-center gap-2 text-slate-700">
         {icon}
         <p className="text-sm font-semibold text-slate-950">{title}</p>
@@ -1084,7 +1223,7 @@ function StatTile({
   detail?: string;
 }) {
   return (
-    <div className="min-w-0 rounded-lg border border-slate-200 bg-white p-3">
+    <div className="field-surface min-w-0 rounded-lg p-3">
       <p className="truncate text-xs text-slate-500">{label}</p>
       <p className="truncate text-lg font-semibold text-slate-950">{value}</p>
       {detail && <p className="truncate text-xs text-slate-400">{detail}</p>}
@@ -1115,7 +1254,7 @@ function ModelSelect({
         value={selectedModel}
         disabled={disabled}
         onChange={(event) => onSelectModel(event.target.value)}
-        className="h-8 max-w-52 appearance-none rounded-lg border border-slate-200 bg-white py-0 pl-2.5 pr-7 text-sm text-slate-700 outline-none transition hover:bg-slate-50 focus:border-slate-400 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 max-md:max-w-36"
+        className="field-surface h-8 max-w-52 appearance-none rounded-lg py-0 pl-2.5 pr-7 text-sm text-slate-700 outline-none transition hover:bg-white/10 disabled:cursor-not-allowed disabled:text-slate-400 max-md:max-w-36"
         title="Select model"
       >
         {options.map((model) => (
@@ -1131,7 +1270,7 @@ function ModelSelect({
 
 function StatusChip({ label }: { label: string }) {
   return (
-    <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-600">
+    <span className="field-surface rounded-lg px-2 py-1 text-xs font-medium text-slate-600">
       {label}
     </span>
   );
@@ -1149,17 +1288,18 @@ function IconButton({
   onClick?: () => void;
 }) {
   return (
-    <button
+    <MotionButton
       type="button"
+      interaction="icon"
       onClick={onClick}
-      className={`flex h-8 w-8 items-center justify-center rounded-lg transition hover:bg-slate-100 hover:text-slate-900 ${
-        active ? "bg-slate-900 text-white hover:bg-slate-800 hover:text-white" : "text-slate-500"
+      className={`flex h-8 w-8 items-center justify-center rounded-lg transition hover:bg-white/10 hover:text-slate-900 ${
+        active ? "primary-command" : "text-slate-500"
       }`}
       aria-label={label}
       title={label}
     >
       {icon}
-    </button>
+    </MotionButton>
   );
 }
 
@@ -1175,15 +1315,15 @@ function PillButton({
   onClick?: () => void;
 }) {
   return (
-    <button
+    <MotionButton
       type="button"
       onClick={onClick}
-      className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-sm transition hover:bg-slate-100 hover:text-slate-900 ${
-        active ? "bg-slate-900 text-white hover:bg-slate-800 hover:text-white" : "text-slate-600"
+      className={`flex h-8 items-center gap-1.5 rounded-lg px-2 text-sm transition hover:bg-white/10 hover:text-slate-900 ${
+        active ? "primary-command" : "text-slate-600"
       }`}
     >
       {icon}
       {label}
-    </button>
+    </MotionButton>
   );
 }

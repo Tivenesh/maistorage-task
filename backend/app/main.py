@@ -805,6 +805,9 @@ def stream_chat(session_id: str, payload: ChatRequest, db: Session = Depends(get
                     "session_id": session_id,
                     "session_title": session.title,
                     "model": selected_model or model_name,
+                    "provider": selected_provider.provider if selected_provider else "gemini",
+                    "orchestrated": payload.orchestrate,
+                    "prompt_chars": run.prompt_chars,
                 },
                 event="metadata",
             )
@@ -841,6 +844,7 @@ def stream_chat(session_id: str, payload: ChatRequest, db: Session = Depends(get
             
             # On completion, save assistant response to DB using a dedicated session bound to the same engine
             db_save = sessionmaker(bind=db.get_bind())()
+            completed_run_payload = None
             try:
                 assistant_msg = ChatMessage(session_id=session_id, role="assistant", content=accumulated_text)
                 db_save.add(assistant_msg)
@@ -849,6 +853,16 @@ def stream_chat(session_id: str, payload: ChatRequest, db: Session = Depends(get
                     saved_run.status = "completed"
                     saved_run.response_chars = len(accumulated_text)
                     saved_run.duration_ms = int((time.perf_counter() - started_at) * 1000)
+                    completed_run_payload = {
+                        "run_id": saved_run.id,
+                        "status": saved_run.status,
+                        "duration_ms": saved_run.duration_ms,
+                        "prompt_chars": saved_run.prompt_chars,
+                        "response_chars": saved_run.response_chars,
+                        "model": saved_run.model,
+                        "provider": saved_run.provider,
+                        "orchestrated": saved_run.orchestrated,
+                    }
                 db_save.commit()
                 logger.info(f"Saved LLM assistant response for session: {session_id}")
             except Exception as save_err:
@@ -857,6 +871,8 @@ def stream_chat(session_id: str, payload: ChatRequest, db: Session = Depends(get
             finally:
                 db_save.close()
             
+            if completed_run_payload:
+                yield sse_json_event(completed_run_payload, event="run")
             yield sse_event("[DONE]", event="end")
         except Exception as e:
             logger.error(f"Error in streaming event generator: {str(e)}")

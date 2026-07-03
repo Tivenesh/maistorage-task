@@ -131,7 +131,7 @@ class AppSettings(Base):
     __tablename__ = "app_settings"
 
     id = Column(Integer, primary_key=True, default=1)
-    theme = Column(String, nullable=False, default="light")
+    theme = Column(String, nullable=False, default="dark")
     sidebar_collapsed = Column(Boolean, nullable=False, default=False)
     default_model = Column(String, nullable=False, default="models/gemini-3.1-pro-preview")
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
