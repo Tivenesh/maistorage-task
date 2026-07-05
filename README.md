@@ -1,5 +1,8 @@
 # Maistorage AI R&D Chat Task
 
+https://www.youtube.com/watch?v=xGY3qTFDpI8 - Presentation Video
+
+
 This project is a compact FastAPI + Next.js implementation for Question 2 of the Maistorage interview task. The UI is branded as Tesseracq Labs as a personal portfolio wrapper, while the technical deliverable focuses on token streaming, chat-session memory, database persistence, testing, and Docker deployment.
 
 ## What It Builds
